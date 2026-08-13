@@ -1,0 +1,3 @@
+# Add the desktop application without changing existing application behavior
+
+The desktop application will live in new modules and reuse current Oh My Pi behavior and Shared Application Data in place. Existing files may receive only Additive Integration for exports, command registration, workspace manifests, builds, and packaging; existing terminal, AgentSession, tool, workflow, and persistence behavior must remain unchanged and be protected by regression verification. Desktop completeness is measured against all current Oh My Pi user workflows, while terminal rendering mechanics are explicitly classified as Terminal-only Capabilities and behavioral equivalents use Native Desktop Workflows.

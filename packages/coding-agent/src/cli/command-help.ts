@@ -56,6 +56,8 @@ export const grievancesHelp = {
 	description: "View, clean, or push reported tool issues (auto-QA grievances)",
 } satisfies CommandMetadata;
 
+export const guiHelp = { description: "Open the Oh My Pi desktop application" } satisfies CommandMetadata;
+
 export const installHelp = {
 	description: "Install or link an extension package (alias of `plugin install`/`plugin link`)",
 } satisfies CommandMetadata;

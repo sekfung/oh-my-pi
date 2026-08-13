@@ -280,6 +280,31 @@ describe("Settings", () => {
 			expect(await Bun.file(backupPath).text()).toBe(corrupted);
 		});
 
+		it("persists and clears project-scoped tool approval policies without replacing sibling config", async () => {
+			await writeSettings({});
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ tools: { approval: { read: "prompt" } }, custom: { keep: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.setProjectApprovalPolicy("bash", "allow");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				tools: { approval: { read: "prompt", bash: "allow" } },
+				custom: { keep: true },
+			});
+			expect(settings.get("tools.approval")).toMatchObject({ read: "prompt", bash: "allow" });
+
+			settings.clearProjectApprovalPolicy("bash");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				tools: { approval: { read: "prompt" } },
+				custom: { keep: true },
+			});
+		});
+
 		it("preserves a symlinked main config while atomically updating its target", async () => {
 			const managedConfigPath = tempDir.join("managed-config.yml");
 			await Bun.write(managedConfigPath, YAML.stringify({ setupVersion: 1 }, null, 2));

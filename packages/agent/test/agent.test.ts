@@ -18,6 +18,21 @@ describe("Agent", () => {
 		expect(agent.state.messages).not.toContainEqual(message);
 	});
 
+	it("emits authoritative queue counts for enqueue and removal", () => {
+		const agent = new Agent();
+		const events: AgentEvent[] = [];
+		agent.subscribe(event => events.push(event));
+		agent.steer({ role: "user", content: "first", timestamp: Date.now() });
+		agent.followUp({ role: "user", content: "second", timestamp: Date.now() });
+		agent.popLastSteer();
+
+		expect(events.filter(event => event.type === "queue_changed")).toEqual([
+			{ type: "queue_changed", steering: 1, followUp: 0 },
+			{ type: "queue_changed", steering: 1, followUp: 1 },
+			{ type: "queue_changed", steering: 0, followUp: 1 },
+		]);
+	});
+
 	it("classifies agent-authored steering as a parent steering message", async () => {
 		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];

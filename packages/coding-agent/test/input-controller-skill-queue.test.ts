@@ -622,6 +622,25 @@ describe("AgentSession derived queued custom display", () => {
 		const remaining = session.agent.peekSteeringQueue();
 		expect(remaining.map(m => (m.role === "custom" ? m.customType : m.role))).toEqual(["ultrathink-notice", "user"]);
 	});
+
+	it("removes a selected queued message by stable id without disturbing its neighbors", async () => {
+		fixture = await createRealSession();
+		const { session } = fixture;
+		queueUserSteer(session, "first");
+		queueMagicCompanion(session, "orchestrate-notice");
+		queueUserSteer(session, "second");
+
+		const before = session.getQueuedMessageItems();
+		expect(before.map(item => ({ delivery: item.delivery, text: item.text }))).toEqual([
+			{ delivery: "steer", text: "first" },
+			{ delivery: "steer", text: "second" },
+		]);
+		expect(session.getQueuedMessageItems().map(item => item.id)).toEqual(before.map(item => item.id));
+
+		expect(session.removeQueuedMessage(before[1].id)).toEqual({ text: "second", images: undefined });
+		expect(session.getQueuedMessageItems()).toEqual([before[0]]);
+		expect(session.agent.peekSteeringQueue()).toHaveLength(1);
+	});
 });
 
 function createStubInteractiveModeContextForUiHelpers(session: AgentSession) {

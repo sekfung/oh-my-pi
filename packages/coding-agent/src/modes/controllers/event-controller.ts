@@ -236,6 +236,11 @@ export class EventController {
 			message_start: e => this.#handleMessageStart(e),
 			message_update: e => this.#handleMessageUpdate(e),
 			message_end: e => this.#handleMessageEnd(e),
+			queue_changed: async () => {
+				this.ctx.updatePendingMessagesDisplay();
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+			},
 			tool_execution_start: e => this.#handleToolExecutionStart(e),
 			tool_execution_update: e => this.#handleToolExecutionUpdate(e),
 			tool_execution_end: e => this.#handleToolExecutionEnd(e),

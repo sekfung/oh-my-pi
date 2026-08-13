@@ -224,6 +224,7 @@ import type {
 	ModelCycleResult,
 	Prewalk,
 	PromptOptions,
+	QueuedUserMessage,
 	ResetSessionContextResult,
 	ResolvedRoleModel,
 	RestoredQueuedMessage,
@@ -495,6 +496,7 @@ export class AgentSession {
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
+	#queuedMessageIds = new WeakMap<AgentMessage, string>();
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
@@ -6258,6 +6260,62 @@ export class AgentSession {
 		};
 	}
 
+	/** Stable application-host projection of queued user messages. */
+	getQueuedMessageItems(): QueuedUserMessage[] {
+		const project = (messages: readonly AgentMessage[], delivery: QueuedUserMessage["delivery"]) =>
+			messages.filter(isUserQueuedMessage).map(message => ({
+				id: this.#queuedMessageId(message),
+				delivery,
+				...toRestoredQueuedMessage(message),
+			}));
+		return [
+			...project(this.agent.peekSteeringQueue(), "steer"),
+			...project(this.agent.peekFollowUpQueue(), "followUp"),
+		];
+	}
+
+	/** Remove one queued user message by its opaque host-facing id. */
+	removeQueuedMessage(id: string): RestoredQueuedMessage | undefined {
+		const steering = this.agent.peekSteeringQueue();
+		const followUp = this.agent.peekFollowUpQueue();
+		const remove = (queue: readonly AgentMessage[]): { next: AgentMessage[]; removed: AgentMessage } | undefined => {
+			const index = queue.findIndex(
+				message => isUserQueuedMessage(message) && this.#queuedMessageId(message) === id,
+			);
+			if (index < 0) return undefined;
+			return { next: this.#removeQueuedMessageWithCompanions(queue, index), removed: queue[index] };
+		};
+		const fromSteering = remove(steering);
+		if (fromSteering) {
+			this.agent.replaceQueues(fromSteering.next, followUp.slice());
+			this.#reconcileQueuedMessageDrain();
+			return toRestoredQueuedMessage(fromSteering.removed);
+		}
+		const fromFollowUp = remove(followUp);
+		if (fromFollowUp) {
+			this.agent.replaceQueues(steering.slice(), fromFollowUp.next);
+			this.#reconcileQueuedMessageDrain();
+			return toRestoredQueuedMessage(fromFollowUp.removed);
+		}
+		return undefined;
+	}
+
+	#queuedMessageId(message: AgentMessage): string {
+		const existing = this.#queuedMessageIds.get(message);
+		if (existing) return existing;
+		const id = `queue-${Snowflake.next()}`;
+		this.#queuedMessageIds.set(message, id);
+		return id;
+	}
+
+	#removeQueuedMessageWithCompanions(queue: readonly AgentMessage[], userIndex: number): AgentMessage[] {
+		let start = userIndex;
+		while (start > 0 && isHiddenUserCompanion(queue[start - 1])) start--;
+		const next = queue.slice();
+		next.splice(start, userIndex - start + 1);
+		return next;
+	}
+
 	/**
 	 * Pop the last queued message (steering first, then follow-up).
 	 * Used by dequeue keybinding to restore messages to editor one at a time.
@@ -6275,24 +6333,17 @@ export class AgentSession {
 		// Notices queue immediately before their user message, so dropping the popped
 		// prompt means also dropping the contiguous hidden-user companions right before
 		// it — companions of other queued prompts stay put.
-		const removeWithCompanions = (queue: readonly AgentMessage[], userIndex: number): AgentMessage[] => {
-			let start = userIndex;
-			while (start > 0 && isHiddenUserCompanion(queue[start - 1])) start--;
-			const next = queue.slice();
-			next.splice(start, userIndex - start + 1);
-			return next;
-		};
 		const fromSteer = lastUserIndex(steering);
 		if (fromSteer >= 0) {
 			const removed = steering[fromSteer];
-			this.agent.replaceQueues(removeWithCompanions(steering, fromSteer), followUp.slice());
+			this.agent.replaceQueues(this.#removeQueuedMessageWithCompanions(steering, fromSteer), followUp.slice());
 			this.#reconcileQueuedMessageDrain();
 			return toRestoredQueuedMessage(removed);
 		}
 		const fromFollowUp = lastUserIndex(followUp);
 		if (fromFollowUp >= 0) {
 			const removed = followUp[fromFollowUp];
-			this.agent.replaceQueues(steering.slice(), removeWithCompanions(followUp, fromFollowUp));
+			this.agent.replaceQueues(steering.slice(), this.#removeQueuedMessageWithCompanions(followUp, fromFollowUp));
 			this.#reconcileQueuedMessageDrain();
 			return toRestoredQueuedMessage(removed);
 		}

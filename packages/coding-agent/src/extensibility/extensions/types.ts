@@ -18,6 +18,7 @@ import type {
 	ThinkingLevel,
 	ToolApproval,
 	ToolLoadMode,
+	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
@@ -131,6 +132,19 @@ export interface ExtensionUISelectOption {
 }
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;
+
+export type ToolApprovalChoice = "allow_once" | "allow_project" | "deny_once" | "deny_project";
+
+export interface ToolApprovalUIRequest {
+	sessionId: string;
+	toolCallId: string;
+	toolName: string;
+	policyKey: string;
+	tier: ToolTier;
+	reason?: string;
+	preview: string;
+	choices: ToolApprovalChoice[];
+}
 
 export interface ExtensionAskDialogOption {
 	label: string;
@@ -257,6 +271,9 @@ export interface ExtensionUIContext {
 		options: ExtensionUISelectItem[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<string | undefined>;
+
+	/** Show a typed tool-approval dialog when the host has a native approval surface. */
+	requestToolApproval?(request: ToolApprovalUIRequest): Promise<ToolApprovalChoice | undefined>;
 
 	/** Show a confirmation dialog. */
 	confirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean>;

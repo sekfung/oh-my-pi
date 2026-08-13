@@ -351,6 +351,8 @@ export class Settings {
 	#modified = new Set<string>();
 	/** Individual project model roles modified during this session */
 	#modifiedProjectModelRoles = new Set<string>();
+	/** Individual project tool-approval policies modified during this session. */
+	#modifiedProjectApprovalPolicies = new Set<string>();
 	/** Individual global model roles modified during this session (for partial save) */
 	#modifiedGlobalModelRoles = new Set<string>();
 	/**
@@ -599,7 +601,7 @@ export class Settings {
 		if (this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) {
 			await this.#saveNow();
 		}
-		if (this.#modifiedProjectModelRoles.size > 0) {
+		if (this.#modifiedProjectModelRoles.size > 0 || this.#modifiedProjectApprovalPolicies.size > 0) {
 			await this.#saveProjectNow();
 		}
 	}
@@ -940,6 +942,34 @@ export class Settings {
 		this.#setProjectModelRoleValue(role, null);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, undefined);
+	}
+
+	/** Persist one tool approval policy in the active project's native settings. */
+	setProjectApprovalPolicy(policyKey: string, policy: "allow" | "deny" | "prompt"): void {
+		if (!policyKey) throw new Error("Project approval policy key cannot be empty");
+		const prev = this.get("tools.approval");
+		const projectPolicies = getByPath(this.#project, ["tools", "approval"]);
+		const current: Record<string, unknown> = isRecord(projectPolicies) ? { ...projectPolicies } : {};
+		current[policyKey] = policy;
+		setByPath(this.#project, ["tools", "approval"], current);
+		this.#modifiedProjectApprovalPolicies.add(policyKey);
+		this.#rebuildMerged();
+		this.#fireEffectiveSettingChanged("tools.approval", this.get("tools.approval"), prev);
+		this.#queueProjectSave();
+	}
+
+	/** Remove one project tool policy so the lower-precedence global/default policy applies again. */
+	clearProjectApprovalPolicy(policyKey: string): void {
+		if (!policyKey) throw new Error("Project approval policy key cannot be empty");
+		const prev = this.get("tools.approval");
+		const projectPolicies = getByPath(this.#project, ["tools", "approval"]);
+		const current: Record<string, unknown> = isRecord(projectPolicies) ? { ...projectPolicies } : {};
+		delete current[policyKey];
+		setByPath(this.#project, ["tools", "approval"], current);
+		this.#modifiedProjectApprovalPolicies.add(policyKey);
+		this.#rebuildMerged();
+		this.#fireEffectiveSettingChanged("tools.approval", this.get("tools.approval"), prev);
+		this.#queueProjectSave();
 	}
 
 	/**
@@ -2157,11 +2187,18 @@ export class Settings {
 	}
 
 	async #saveProjectNow(): Promise<void> {
-		if (this.#savesCancelled || !this.#persist || this.#modifiedProjectModelRoles.size === 0) return;
+		if (
+			this.#savesCancelled ||
+			!this.#persist ||
+			(this.#modifiedProjectModelRoles.size === 0 && this.#modifiedProjectApprovalPolicies.size === 0)
+		)
+			return;
 
 		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
 		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
+		const modifiedApprovalPolicies = [...this.#modifiedProjectApprovalPolicies];
 		this.#modifiedProjectModelRoles.clear();
+		this.#modifiedProjectApprovalPolicies.clear();
 
 		try {
 			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
@@ -2176,6 +2213,11 @@ export class Settings {
 					const value = isRecord(projectRoles) ? projectRoles[role] : undefined;
 					setByPath(projectSettings, ["modelRoles", role], value);
 				}
+				const projectPolicies = getByPath(this.#project, ["tools", "approval"]);
+				for (const policyKey of modifiedApprovalPolicies) {
+					const value = isRecord(projectPolicies) ? projectPolicies[policyKey] : undefined;
+					setByPath(projectSettings, ["tools", "approval", policyKey], value);
+				}
 
 				await this.#writeYamlAtomically(writePath, projectSettings);
 				this.#projectFileSettings = structuredClone(projectSettings);
@@ -2185,6 +2227,9 @@ export class Settings {
 		} catch (error) {
 			for (const role of modifiedModelRoles) {
 				this.#modifiedProjectModelRoles.add(role);
+			}
+			for (const policyKey of modifiedApprovalPolicies) {
+				this.#modifiedProjectApprovalPolicies.add(policyKey);
 			}
 			throw error;
 		}

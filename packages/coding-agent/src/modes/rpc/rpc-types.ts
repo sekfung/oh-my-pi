@@ -7,8 +7,13 @@
 import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
+import type {
+	ApplicationIntentRequest,
+	ApplicationIntentResult,
+	ApplicationSnapshot,
+} from "../../application/application-types";
 import type { BashResult } from "../../exec/bash-executor";
-import type { ContextUsage } from "../../extensibility/extensions/types";
+import type { ContextUsage, ToolApprovalChoice, ToolApprovalUIRequest } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
@@ -39,6 +44,8 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "get_application_snapshot" }
+	| ({ id?: string; type: "execute_application_intent" } & ApplicationIntentRequest)
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
@@ -216,6 +223,20 @@ export type RpcResponse =
 	| {
 			id?: string;
 			type: "response";
+			command: "get_application_snapshot";
+			success: true;
+			data: ApplicationSnapshot;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "execute_application_intent";
+			success: true;
+			data: ApplicationIntentResult;
+	  }
+	| {
+			id?: string;
+			type: "response";
 			command: "set_fast_mode";
 			success: true;
 			data: { enabled: boolean; active: boolean };
@@ -370,6 +391,7 @@ export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
 
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest =
+	| ({ type: "extension_ui_request"; id: string; method: "toolApproval" } & ToolApprovalUIRequest)
 	| { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number }
 	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
 	| {
@@ -534,6 +556,7 @@ export interface RpcHostUriResult {
 /** Response to an extension UI request */
 export type RpcExtensionUIResponse =
 	| { type: "extension_ui_response"; id: string; value: string }
+	| { type: "extension_ui_response"; id: string; approvalChoice: ToolApprovalChoice }
 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
 	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean };
 

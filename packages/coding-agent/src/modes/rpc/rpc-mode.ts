@@ -14,6 +14,11 @@ import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	AgentSessionApplicationRuntime,
+	ApplicationController,
+	ApplicationStaleRevisionError,
+} from "../../application/application-controller";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -22,6 +27,8 @@ import {
 	type ExtensionUISelectItem,
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
+	type ToolApprovalChoice,
+	type ToolApprovalUIRequest,
 } from "../../extensibility/extensions";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
@@ -724,6 +731,10 @@ export async function runRpcMode(
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
 	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
+	const application = new ApplicationController(
+		new AgentSessionApplicationRuntime(session, { onSessionChanged: () => subagentRegistry?.clear() }),
+		output,
+	);
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
@@ -754,6 +765,20 @@ export async function runRpcMode(
 					timeout: dialogOptions?.timeout,
 				},
 				response => parseValueDialogResponse(response, dialogOptions),
+			);
+		}
+
+		requestToolApproval(request: ToolApprovalUIRequest): Promise<ToolApprovalChoice | undefined> {
+			return requestRpcDialog(
+				this.pendingRequests,
+				this.output,
+				undefined,
+				undefined,
+				{ method: "toolApproval", ...request },
+				response => {
+					if (!("approvalChoice" in response)) return undefined;
+					return request.choices.includes(response.approvalChoice) ? response.approvalChoice : undefined;
+				},
 			);
 		}
 
@@ -1101,6 +1126,23 @@ export async function runRpcMode(
 					contextUsage: session.getContextUsage(),
 				};
 				return success(id, "get_state", state);
+			}
+
+			case "get_application_snapshot": {
+				return success(id, "get_application_snapshot", await application.snapshot());
+			}
+
+			case "execute_application_intent": {
+				try {
+					return success(id, "execute_application_intent", await application.execute(command));
+				} catch (intentError) {
+					return error(
+						id,
+						"execute_application_intent",
+						intentError instanceof Error ? intentError.message : String(intentError),
+						intentError instanceof ApplicationStaleRevisionError ? "stale_revision" : undefined,
+					);
+				}
 			}
 
 			case "set_fast_mode": {
@@ -1509,6 +1551,7 @@ export async function runRpcMode(
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	await inputDispatcher.drain();
 	await shutdownCoordinator.drain();
+	application.dispose();
 	subagentRegistry?.dispose();
 	// Dispose the main session before exiting so the browser reaper and other
 	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a

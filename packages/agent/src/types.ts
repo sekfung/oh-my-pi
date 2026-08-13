@@ -879,6 +879,7 @@ export type AgentEvent =
 	// Only emitted for assistant messages during streaming
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
+	| { type: "queue_changed"; steering: number; followUp: number }
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; intent?: string }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }

@@ -11,6 +11,7 @@
 import type { CommandEntry } from "@oh-my-pi/pi-utils/cli";
 import * as commandHelp from "./cli/command-help";
 import { flagConsumesValue } from "./cli/flag-tables";
+import Gui from "./commands/gui";
 import { launchHelp } from "./commands/launch-help";
 
 export const commands: CommandEntry[] = [
@@ -99,6 +100,11 @@ export const commands: CommandEntry[] = [
 		name: "grievances",
 		load: () => import("./commands/grievances").then(m => m.default),
 		help: commandHelp.grievancesHelp,
+	},
+	{
+		name: "gui",
+		load: async () => Gui,
+		help: commandHelp.guiHelp,
 	},
 	{
 		name: "install",

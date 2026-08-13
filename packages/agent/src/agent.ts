@@ -949,9 +949,15 @@ export class Agent {
 	}
 
 	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
+		const changed =
+			steering.length !== this.#steeringQueue.length ||
+			followUp.length !== this.#followUpQueue.length ||
+			steering.some((message, index) => message !== this.#steeringQueue[index]) ||
+			followUp.some((message, index) => message !== this.#followUpQueue[index]);
 		this.#steeringQueue = steering.slice();
 		this.#followUpQueue = followUp.slice();
 		this.#notifySteeringWaiters();
+		if (changed) this.#emitQueueChanged();
 	}
 
 	appendMessage(m: AgentMessage) {
@@ -973,6 +979,7 @@ export class Agent {
 	steer(m: AgentMessage) {
 		this.#steeringQueue.push(m);
 		this.#notifySteeringWaiters();
+		this.#emitQueueChanged();
 	}
 
 	/**
@@ -981,15 +988,20 @@ export class Agent {
 	 */
 	followUp(m: AgentMessage) {
 		this.#followUpQueue.push(m);
+		this.#emitQueueChanged();
 	}
 
 	clearSteeringQueue() {
+		const changed = this.#steeringQueue.length > 0;
 		this.#steeringQueue = [];
 		this.#notifySteeringWaiters();
+		if (changed) this.#emitQueueChanged();
 	}
 
 	clearFollowUpQueue() {
+		if (this.#followUpQueue.length === 0) return;
 		this.#followUpQueue = [];
+		this.#emitQueueChanged();
 	}
 
 	/**
@@ -1002,10 +1014,12 @@ export class Agent {
 	}
 
 	clearAllQueues() {
+		const changed = this.#steeringQueue.length > 0 || this.#followUpQueue.length > 0;
 		this.#steeringQueue = [];
 		this.#followUpQueue = [];
 		this.#notifySteeringWaiters();
 		this.clearDeferredToolDirectives();
+		if (changed) this.#emitQueueChanged();
 	}
 
 	hasQueuedMessages(): boolean {
@@ -1035,12 +1049,14 @@ export class Agent {
 			if (this.#steeringQueue.length > 0) {
 				const first = this.#steeringQueue[0];
 				this.#steeringQueue = this.#steeringQueue.slice(1);
+				this.#emitQueueChanged();
 				return [first];
 			}
 			return [];
 		}
 		const steering = this.#steeringQueue.slice();
 		this.#steeringQueue = [];
+		if (steering.length > 0) this.#emitQueueChanged();
 		return steering;
 	}
 
@@ -1049,12 +1065,14 @@ export class Agent {
 			if (this.#followUpQueue.length > 0) {
 				const first = this.#followUpQueue[0];
 				this.#followUpQueue = this.#followUpQueue.slice(1);
+				this.#emitQueueChanged();
 				return [first];
 			}
 			return [];
 		}
 		const followUp = this.#followUpQueue.slice();
 		this.#followUpQueue = [];
+		if (followUp.length > 0) this.#emitQueueChanged();
 		return followUp;
 	}
 
@@ -1063,7 +1081,9 @@ export class Agent {
 	 * Used by dequeue keybinding.
 	 */
 	popLastSteer(): AgentMessage | undefined {
-		return this.#steeringQueue.pop();
+		const message = this.#steeringQueue.pop();
+		if (message) this.#emitQueueChanged();
+		return message;
 	}
 
 	/**
@@ -1071,7 +1091,17 @@ export class Agent {
 	 * Used by dequeue keybinding.
 	 */
 	popLastFollowUp(): AgentMessage | undefined {
-		return this.#followUpQueue.pop();
+		const message = this.#followUpQueue.pop();
+		if (message) this.#emitQueueChanged();
+		return message;
+	}
+
+	#emitQueueChanged(): void {
+		this.#emit({
+			type: "queue_changed",
+			steering: this.#steeringQueue.length,
+			followUp: this.#followUpQueue.length,
+		});
 	}
 
 	clearMessages() {
@@ -1110,6 +1140,7 @@ export class Agent {
 	}
 
 	reset() {
+		const queueChanged = this.#steeringQueue.length > 0 || this.#followUpQueue.length > 0;
 		this.#state.messages.length = 0;
 		this.#state.isStreaming = false;
 		this.#state.streamMessage = null;
@@ -1119,6 +1150,7 @@ export class Agent {
 		this.#followUpQueue = [];
 		this.#notifySteeringWaiters();
 		this.clearDeferredToolDirectives();
+		if (queueChanged) this.#emitQueueChanged();
 	}
 
 	/** Send a prompt with an AgentMessage */

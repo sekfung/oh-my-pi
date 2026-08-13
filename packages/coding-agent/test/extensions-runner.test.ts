@@ -25,6 +25,8 @@ import type {
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
+	ToolApprovalChoice,
+	ToolApprovalUIRequest,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -1834,6 +1836,7 @@ describe("ExtensionRunner", () => {
 		const initializeRunner = (
 			runner: ExtensionRunner,
 			select: (title: string, options: string[]) => Promise<string | undefined>,
+			requestToolApproval?: (request: ToolApprovalUIRequest) => Promise<ToolApprovalChoice | undefined>,
 		) => {
 			runner.initialize(
 				{
@@ -1864,6 +1867,7 @@ describe("ExtensionRunner", () => {
 				undefined,
 				{
 					select,
+					requestToolApproval,
 					confirm: async () => false,
 					input: async () => undefined,
 					notify: () => {},
@@ -1897,7 +1901,7 @@ describe("ExtensionRunner", () => {
 			name: "dangerous_tool",
 			label: "Dangerous Tool",
 			description: "Test tool",
-			parameters: {} as never,
+			parameters: Type.Object({}),
 			approval: "exec" as const,
 			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 		};
@@ -1953,6 +1957,47 @@ describe("ExtensionRunner", () => {
 				"Deny",
 			]);
 			delete globalState.__approvalEvents;
+		});
+
+		it("persists a typed project approval before executing the tool", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const requestToolApproval = vi.fn(async () => "allow_project" as const);
+			initializeRunner(runner, async () => "Deny", requestToolApproval);
+			const setProjectApprovalPolicy = vi.fn();
+			const flush = vi.fn(async () => {});
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
+
+			await wrapper.execute("call-project-approval", {}, undefined, undefined, {
+				sessionManager,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: {
+					get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+					setProjectApprovalPolicy,
+					flush,
+				} as never,
+			});
+
+			expect(requestToolApproval).toHaveBeenCalledWith(
+				expect.objectContaining({
+					toolName: "dangerous_tool",
+					policyKey: "dangerous_tool",
+					tier: "exec",
+					choices: ["allow_once", "allow_project", "deny_once", "deny_project"],
+				}),
+			);
+			expect(setProjectApprovalPolicy).toHaveBeenCalledWith("dangerous_tool", "allow");
+			expect(flush).toHaveBeenCalledTimes(1);
 		});
 
 		it("does not present approval before the tool preview is ready", async () => {

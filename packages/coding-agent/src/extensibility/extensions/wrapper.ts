@@ -17,7 +17,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
-import type { RegisteredTool, ToolCallEventResult } from "./types";
+import type { RegisteredTool, ToolApprovalChoice, ToolCallEventResult } from "./types";
 
 /**
  * Adapts a RegisteredTool into an AgentTool.
@@ -320,14 +320,39 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				pendingSafetyChecks.length > 0
 					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
 					: basePrompt;
-			let choice: string | undefined;
+			let choice: ToolApprovalChoice | undefined;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				if (uiContext.requestToolApproval) {
+					choice = await uiContext.requestToolApproval({
+						sessionId,
+						toolCallId,
+						toolName: this.tool.name,
+						policyKey: resolved.policyKey ?? this.tool.name,
+						tier: resolved.tier,
+						...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
+						preview: safetyPrompt,
+						choices:
+							pendingSafetyChecks.length > 0
+								? ["allow_once", "deny_once"]
+								: ["allow_once", "allow_project", "deny_once", "deny_project"],
+					});
+				} else {
+					const legacyChoice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+					choice = legacyChoice === "Approve" ? "allow_once" : "deny_once";
+				}
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				throw err;
 			}
-			const approved = choice === "Approve";
+			if (choice === "allow_project" || choice === "deny_project") {
+				if (!settings) throw new Error("Project approval settings are unavailable");
+				settings.setProjectApprovalPolicy(
+					resolved.policyKey ?? this.tool.name,
+					choice === "allow_project" ? "allow" : "deny",
+				);
+				await settings.flush();
+			}
+			const approved = choice === "allow_once" || choice === "allow_project";
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
 			if (!approved) {
 				throw new Error(`Tool call denied by user: ${this.tool.name}`);

@@ -415,3 +415,9 @@ export interface ResetSessionContextResult {
 
 /** Queued user content restored to the editor. */
 export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+
+/** Stable, user-restorable view of one queued message for application hosts. */
+export type QueuedUserMessage = RestoredQueuedMessage & {
+	id: string;
+	delivery: "steer" | "followUp";
+};

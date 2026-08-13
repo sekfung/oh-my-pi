@@ -1,0 +1,42 @@
+{
+  "name": "@oh-my-pi/desktop",
+  "version": "17.2.15",
+  "private": true,
+  "type": "module",
+  "description": "Native desktop presentation for Oh My Pi",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "biome check . && bun run check:types",
+    "check:types": "tsgo -p tsconfig.json --noEmit",
+    "test": "bun test test",
+    "lint": "biome lint .",
+    "fix": "biome check --write --unsafe .",
+    "fmt": "biome format --write .",
+    "sidecar": "bun scripts/build-sidecar.ts",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@fontsource-variable/geist": "catalog:",
+    "@tauri-apps/api": "catalog:",
+    "@tauri-apps/plugin-dialog": "catalog:",
+    "class-variance-authority": "catalog:",
+    "clsx": "catalog:",
+    "lucide-react": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "tailwind-merge": "catalog:"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "catalog:",
+    "@tauri-apps/cli": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "shadcn": "catalog:",
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:"
+  }
+}
