@@ -20,7 +20,20 @@ import {
 	ApplicationStaleRevisionError,
 } from "../../application/application-controller";
 import { buildWorkspaceReview } from "../../application/workspace-review";
-import { reset as resetCapabilities } from "../../capability";
+import { loadCapability, reset as resetCapabilities } from "../../capability";
+import type { Prompt } from "../../capability/prompt";
+import {
+	getDefault,
+	getEnumValues,
+	getPathsForTab,
+	getType,
+	getUi,
+	isCredential,
+	SETTING_TABS,
+	type SettingPath,
+	TAB_GROUPS,
+	TAB_METADATA,
+} from "../../config/settings-schema";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionUIContext,
@@ -31,13 +44,16 @@ import {
 	type ToolApprovalChoice,
 	type ToolApprovalUIRequest,
 } from "../../extensibility/extensions";
+import { PluginManager } from "../../extensibility/plugins/manager";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { MCPManager } from "../../mcp/manager";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
+import { discoverAgents } from "../../task/discovery";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
@@ -60,8 +76,11 @@ import type {
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
 	RpcHostUriResult,
+	RpcResourcesSnapshot,
 	RpcResponse,
 	RpcSessionState,
+	RpcSettingDef,
+	RpcSettingValueEntry,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
 
@@ -548,6 +567,9 @@ function shouldEmitRpcTitles(): boolean {
 function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscriptionLevel {
 	return value === "off" || value === "progress" || value === "events";
 }
+
+/** Every schema path that declares `ui` metadata (the GUI-relevant settings surface). Computed once. */
+const ALL_UI_SETTING_PATHS = new Set<SettingPath>(SETTING_TABS.flatMap(tab => getPathsForTab(tab)));
 
 export function requestRpcEditor(
 	pendingRequests: Map<string, PendingExtensionRequest>,
@@ -1111,6 +1133,7 @@ export async function runRpcMode(
 					sessionId: session.sessionId,
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
+					autoRetryEnabled: session.autoRetryEnabled,
 					queuedMessageCount: session.queuedMessageCount,
 					todoPhases: session.getTodoPhases(),
 					fastModeEnabled: session.isFastModeEnabled(),
@@ -1328,13 +1351,42 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "bash": {
-				const result = await session.executeBash(command.command);
+				const result = await session.executeBash(
+					command.command,
+					id ? chunk => output({ type: "bash_output", id, chunk }) : undefined,
+					{ excludeFromContext: command.excludeFromContext, useUserShell: true },
+				);
 				return success(id, "bash", result);
 			}
 
 			case "abort_bash": {
 				session.abortBash();
 				return success(id, "abort_bash");
+			}
+
+			// =================================================================
+			// Approval policy management
+			// =================================================================
+
+			case "get_approval_policies": {
+				return success(id, "get_approval_policies", {
+					project: session.settings.getProjectApprovalPolicies(),
+					global: session.settings.getGlobalApprovalPolicies(),
+				});
+			}
+
+			case "set_approval_policy": {
+				if (command.scope === "global") session.settings.setGlobalApprovalPolicy(command.policyKey, command.policy);
+				else session.settings.setProjectApprovalPolicy(command.policyKey, command.policy);
+				await session.settings.flush();
+				return success(id, "set_approval_policy");
+			}
+
+			case "clear_approval_policy": {
+				if (command.scope === "global") session.settings.clearGlobalApprovalPolicy(command.policyKey);
+				else session.settings.clearProjectApprovalPolicy(command.policyKey);
+				await session.settings.flush();
+				return success(id, "clear_approval_policy");
 			}
 
 			// =================================================================
@@ -1422,6 +1474,154 @@ export async function runRpcMode(
 						pageError instanceof RpcMessagesPageError ? pageError.code : undefined,
 					);
 				}
+			}
+
+			// =================================================================
+			// Async jobs
+			// =================================================================
+
+			case "get_async_jobs": {
+				const jobs = (session.asyncJobManager?.getAllJobs() ?? []).map(job => ({
+					id: job.id,
+					type: job.type,
+					status: job.status,
+					label: job.label,
+					startTime: job.startTime,
+					queued: job.queued,
+					resultText: job.resultText,
+					errorText: job.errorText,
+				}));
+				return success(id, "get_async_jobs", { jobs });
+			}
+
+			case "abort_async_job": {
+				const cancelled = session.asyncJobManager?.cancel(command.jobId) ?? false;
+				return success(id, "abort_async_job", { cancelled });
+			}
+
+			// =================================================================
+			// Settings
+			// =================================================================
+
+			case "get_settings_schema": {
+				const settings: RpcSettingDef[] = [];
+				for (const settingPath of ALL_UI_SETTING_PATHS) {
+					const ui = getUi(settingPath);
+					if (!ui) continue;
+					settings.push({
+						path: settingPath,
+						tab: ui.tab,
+						group: ui.group,
+						label: ui.label,
+						description: ui.description,
+						type: getType(settingPath),
+						enumValues: getEnumValues(settingPath),
+						options: ui.options,
+						secret: isCredential(settingPath) || undefined,
+					});
+				}
+				return success(id, "get_settings_schema", {
+					tabs: SETTING_TABS.map(tab => ({ id: tab, label: TAB_METADATA[tab].label })),
+					groups: TAB_GROUPS,
+					settings,
+				});
+			}
+
+			case "get_settings_values": {
+				const values: RpcSettingValueEntry[] = [];
+				for (const settingPath of ALL_UI_SETTING_PATHS) {
+					const scope: "project" | "global" | "default" =
+						session.settings.getProjectValue(settingPath) !== undefined
+							? "project"
+							: session.settings.getGlobalValue(settingPath) !== undefined
+								? "global"
+								: "default";
+					values.push(
+						isCredential(settingPath)
+							? { path: settingPath, configured: session.settings.isConfigured(settingPath), scope }
+							: { path: settingPath, value: session.settings.get(settingPath), scope },
+					);
+				}
+				return success(id, "get_settings_values", { values });
+			}
+
+			case "set_setting_value": {
+				if (!ALL_UI_SETTING_PATHS.has(command.path as SettingPath)) {
+					return error(id, "set_setting_value", `Unknown setting: ${command.path}`);
+				}
+				const settingPath = command.path as SettingPath;
+				if (command.scope === "project") session.settings.setProject(settingPath, command.value as never);
+				else session.settings.set(settingPath, command.value as never);
+				await session.settings.flush();
+				return success(id, "set_setting_value");
+			}
+
+			case "clear_setting_value": {
+				if (!ALL_UI_SETTING_PATHS.has(command.path as SettingPath)) {
+					return error(id, "clear_setting_value", `Unknown setting: ${command.path}`);
+				}
+				const settingPath = command.path as SettingPath;
+				if (command.scope === "project") session.settings.clearProjectSetting(settingPath);
+				else session.settings.set(settingPath, getDefault(settingPath));
+				await session.settings.flush();
+				return success(id, "clear_setting_value");
+			}
+
+			// =================================================================
+			// Resources
+			// =================================================================
+
+			case "get_resources": {
+				const cwd = session.sessionManager.getCwd();
+				const [promptsResult, plugins, agentsResult] = await Promise.all([
+					loadCapability<Prompt>("prompts", { cwd }).catch(() => ({ items: [], warnings: [] })),
+					new PluginManager(cwd).list().catch(() => []),
+					discoverAgents(cwd).catch(() => ({ agents: [], projectAgentsDir: null })),
+				]);
+				const mcpManager = MCPManager.instance();
+				const mcpServers: RpcResourcesSnapshot["mcpServers"] = (mcpManager?.getAllServerNames() ?? []).map(
+					mcpName => ({
+						name: mcpName,
+						status: mcpManager?.getConnectionStatus(mcpName) ?? "disconnected",
+						toolCount: mcpManager?.getConnection(mcpName)?.tools?.length,
+						sourceLevel: mcpManager?.getSource(mcpName)?.level,
+					}),
+				);
+				const snapshot: RpcResourcesSnapshot = {
+					skills: session.skills.map(skill => ({
+						name: skill.name,
+						description: skill.description,
+						source: skill.source,
+						hide: skill.hide,
+					})),
+					skillWarnings: session.skillWarnings.map(warning => warning.message),
+					prompts: promptsResult.items.map(prompt => ({
+						name: prompt.name,
+						path: prompt.path,
+						sourceLevel: prompt._source.level,
+						providerName: prompt._source.providerName,
+					})),
+					promptWarnings: promptsResult.warnings,
+					plugins: plugins.map(plugin => ({
+						name: plugin.name,
+						version: plugin.version,
+						enabled: plugin.enabled,
+						enabledFeatures: plugin.enabledFeatures,
+					})),
+					mcpServers,
+					agents: agentsResult.agents.map(agent => ({
+						name: agent.name,
+						description: agent.description,
+						source: agent.source,
+					})),
+					tools: session.agent.state.tools.map(tool => ({ name: tool.name, description: tool.description })),
+				};
+				return success(id, "get_resources", snapshot);
+			}
+
+			case "reload_resources": {
+				await reloadPluginState();
+				return success(id, "reload_resources");
 			}
 
 			// =================================================================

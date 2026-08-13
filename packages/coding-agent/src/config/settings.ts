@@ -353,8 +353,12 @@ export class Settings {
 	#modifiedProjectModelRoles = new Set<string>();
 	/** Individual project tool-approval policies modified during this session. */
 	#modifiedProjectApprovalPolicies = new Set<string>();
+	/** Whole-value project setting paths modified during this session (generic `setProject`/`clearProjectSetting`). */
+	#modifiedProjectPaths = new Set<string>();
 	/** Individual global model roles modified during this session (for partial save) */
 	#modifiedGlobalModelRoles = new Set<string>();
+	/** Individual global tool-approval policies modified during this session (for partial save) */
+	#modifiedGlobalApprovalPolicies = new Set<string>();
 	/**
 	 * Original process-wide model-role overrides captured before a project edit
 	 * temporarily replaced them via `#updateRuntimeModelRoleOverride`. Restored
@@ -496,6 +500,16 @@ export class Settings {
 		return getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]) !== undefined;
 	}
 
+	/** Raw value present in the active project's own settings layer, or `undefined` if not set there. */
+	getProjectValue<P extends SettingPath>(path: P): SettingValue<P> | undefined {
+		return getByPath(this.#project, SETTING_PATH_SEGMENTS[path]) as SettingValue<P> | undefined;
+	}
+
+	/** Raw value present in the user's global settings layer, or `undefined` if not set there. */
+	getGlobalValue<P extends SettingPath>(path: P): SettingValue<P> | undefined {
+		return getByPath(this.#global, SETTING_PATH_SEGMENTS[path]) as SettingValue<P> | undefined;
+	}
+
 	/**
 	 * Set a setting value (sync).
 	 * Updates global settings and queues a background save.
@@ -516,6 +530,46 @@ export class Settings {
 			hook(next, prev);
 		}
 		this.#fireEffectiveSettingChanged(path, next, prev);
+	}
+
+	/**
+	 * Set a setting value in the active project's native settings (sync).
+	 * Mirrors `set()` but writes to `#project`/`.omp/config.yml` instead of the
+	 * global config, so the value applies only to this project.
+	 */
+	setProject<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		const prev = this.get(path);
+		const segments = path.split(".");
+		setByPath(this.#project, segments, value);
+		this.#modifiedProjectPaths.add(path);
+		this.#rebuildMerged();
+		const next = this.get(path);
+		this.#queueProjectSave();
+
+		const hook = SETTING_HOOKS[path];
+		if (hook) {
+			hook(next, prev);
+		}
+		this.#fireEffectiveSettingChanged(path, next, prev);
+	}
+
+	/** Remove a setting from the active project's native settings so a lower-precedence value applies again. */
+	clearProjectSetting(path: SettingPath): void {
+		const prev = this.get(path);
+		const segments = path.split(".");
+		let current = this.#project;
+		for (let i = 0; i < segments.length - 1; i++) {
+			const segment = segments[i];
+			if (!(segment in current)) {
+				return;
+			}
+			current = current[segment] as RawSettings;
+		}
+		delete current[segments[segments.length - 1]];
+		this.#modifiedProjectPaths.add(path);
+		this.#rebuildMerged();
+		this.#queueProjectSave();
+		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
 	}
 
 	/**
@@ -598,10 +652,18 @@ export class Settings {
 		if (this.#projectSavePromise) {
 			await this.#projectSavePromise;
 		}
-		if (this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) {
+		if (
+			this.#modified.size > 0 ||
+			this.#modifiedGlobalModelRoles.size > 0 ||
+			this.#modifiedGlobalApprovalPolicies.size > 0
+		) {
 			await this.#saveNow();
 		}
-		if (this.#modifiedProjectModelRoles.size > 0 || this.#modifiedProjectApprovalPolicies.size > 0) {
+		if (
+			this.#modifiedProjectModelRoles.size > 0 ||
+			this.#modifiedProjectApprovalPolicies.size > 0 ||
+			this.#modifiedProjectPaths.size > 0
+		) {
 			await this.#saveProjectNow();
 		}
 	}
@@ -769,6 +831,21 @@ export class Settings {
 			}
 		}
 		return roles;
+	}
+
+	#approvalPoliciesFromLayer(layer: RawSettings): Record<string, "allow" | "deny" | "prompt"> {
+		const value = getByPath(layer, ["tools", "approval"]);
+		if (!isRecord(value)) return {};
+
+		const policies: Record<string, "allow" | "deny" | "prompt"> = {};
+		for (const policyKey in value) {
+			if (!Object.hasOwn(value, policyKey)) continue;
+			const policy = value[policyKey];
+			if (policy === "allow" || policy === "deny" || policy === "prompt") {
+				policies[policyKey] = policy;
+			}
+		}
+		return policies;
 	}
 
 	#modelRoleLayerOwns(layer: RawSettings, role: ModelRole | string): boolean {
@@ -970,6 +1047,52 @@ export class Settings {
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged("tools.approval", this.get("tools.approval"), prev);
 		this.#queueProjectSave();
+	}
+
+	/** Persist one tool approval policy in the user's global settings, applying to every project. */
+	setGlobalApprovalPolicy(policyKey: string, policy: "allow" | "deny" | "prompt"): void {
+		if (!policyKey) throw new Error("Global approval policy key cannot be empty");
+		const prev = this.get("tools.approval");
+		const current: Record<string, unknown> = { ...this.#approvalPoliciesFromLayer(this.#global) };
+		current[policyKey] = policy;
+		setByPath(this.#global, ["tools", "approval"], current);
+		this.#modifiedGlobalApprovalPolicies.add(policyKey);
+		this.#rebuildMerged();
+		this.#fireEffectiveSettingChanged("tools.approval", this.get("tools.approval"), prev);
+		this.#queueSave();
+	}
+
+	/** Remove one global tool policy so the lower-precedence default policy applies again. */
+	clearGlobalApprovalPolicy(policyKey: string): void {
+		if (!policyKey) throw new Error("Global approval policy key cannot be empty");
+		const prev = this.get("tools.approval");
+		const current: Record<string, unknown> = { ...this.#approvalPoliciesFromLayer(this.#global) };
+		delete current[policyKey];
+		setByPath(this.#global, ["tools", "approval"], current);
+		this.#modifiedGlobalApprovalPolicies.add(policyKey);
+		this.#rebuildMerged();
+		this.#fireEffectiveSettingChanged("tools.approval", this.get("tools.approval"), prev);
+		this.#queueSave();
+	}
+
+	/** Read one policy key from only the global settings layer (used to render promote/revoke affordances). */
+	getGlobalApprovalPolicy(policyKey: string): "allow" | "deny" | "prompt" | undefined {
+		return this.#approvalPoliciesFromLayer(this.#global)[policyKey];
+	}
+
+	/** Read one policy key from only the active project's settings layer. */
+	getProjectApprovalPolicy(policyKey: string): "allow" | "deny" | "prompt" | undefined {
+		return this.#approvalPoliciesFromLayer(this.#project)[policyKey];
+	}
+
+	/** All tool-approval policies recorded in the user's global settings, keyed by policy key. */
+	getGlobalApprovalPolicies(): Record<string, "allow" | "deny" | "prompt"> {
+		return this.#approvalPoliciesFromLayer(this.#global);
+	}
+
+	/** All tool-approval policies recorded in the active project's settings, keyed by policy key. */
+	getProjectApprovalPolicies(): Record<string, "allow" | "deny" | "prompt"> {
+		return this.#approvalPoliciesFromLayer(this.#project);
 	}
 
 	/**
@@ -2078,14 +2201,22 @@ export class Settings {
 
 	async #saveNow(): Promise<void> {
 		if (this.#savesCancelled || !this.#persist || !this.#configPath) return;
-		if (this.#modified.size === 0 && this.#modifiedGlobalModelRoles.size === 0) return;
+		if (
+			this.#modified.size === 0 &&
+			this.#modifiedGlobalModelRoles.size === 0 &&
+			this.#modifiedGlobalApprovalPolicies.size === 0
+		)
+			return;
 
 		const configPath = this.#configPath;
 		const modifiedPaths = [...this.#modified];
 		const modifiedModelRoles = [...this.#modifiedGlobalModelRoles];
+		const modifiedApprovalPolicies = [...this.#modifiedGlobalApprovalPolicies];
 		const globalRolesAtStart = this.#modelRolesFromLayer(this.#global);
+		const globalApprovalAtStart = this.#approvalPoliciesFromLayer(this.#global);
 		this.#modified.clear();
 		this.#modifiedGlobalModelRoles.clear();
+		this.#modifiedGlobalApprovalPolicies.clear();
 
 		try {
 			await this.#withYamlWriteLock(configPath, async writePath => {
@@ -2138,6 +2269,41 @@ export class Settings {
 					setByPath(current, ["modelRoles"], mergedRoles);
 				}
 
+				// Mirror the model-roles merge above for global approval policies: only
+				// this save's keys, plus any that changed elsewhere while the lock was
+				// pending, are folded into the re-read file.
+				const latestGlobalApproval = this.#approvalPoliciesFromLayer(this.#global);
+				const approvalToPreserve = new Set(this.#modifiedGlobalApprovalPolicies);
+				for (const policyKey in globalApprovalAtStart) {
+					if (globalApprovalAtStart[policyKey] !== latestGlobalApproval[policyKey]) {
+						approvalToPreserve.add(policyKey);
+					}
+				}
+				for (const policyKey in latestGlobalApproval) {
+					if (globalApprovalAtStart[policyKey] !== latestGlobalApproval[policyKey]) {
+						approvalToPreserve.add(policyKey);
+					}
+				}
+				if (modifiedApprovalPolicies.length > 0 || approvalToPreserve.size > 0) {
+					const currentApproval = getByPath(current, ["tools", "approval"]);
+					const mergedApproval: Record<string, unknown> = isRecord(currentApproval) ? { ...currentApproval } : {};
+					for (const policyKey of modifiedApprovalPolicies) {
+						if (Object.hasOwn(globalApprovalAtStart, policyKey)) {
+							mergedApproval[policyKey] = globalApprovalAtStart[policyKey];
+						} else {
+							delete mergedApproval[policyKey];
+						}
+					}
+					for (const policyKey of approvalToPreserve) {
+						if (Object.hasOwn(latestGlobalApproval, policyKey)) {
+							mergedApproval[policyKey] = latestGlobalApproval[policyKey];
+						} else {
+							delete mergedApproval[policyKey];
+						}
+					}
+					setByPath(current, ["tools", "approval"], mergedApproval);
+				}
+
 				// Update our global with any external changes we preserved
 				this.#global = current;
 				await this.#writeYamlAtomically(writePath, this.#global);
@@ -2150,6 +2316,12 @@ export class Settings {
 						this.#modifiedGlobalModelRoles.delete(role);
 					}
 				}
+				const globalApprovalAfterWrite = this.#approvalPoliciesFromLayer(this.#global);
+				for (const policyKey of approvalToPreserve) {
+					if (latestGlobalApproval[policyKey] === globalApprovalAfterWrite[policyKey]) {
+						this.#modifiedGlobalApprovalPolicies.delete(policyKey);
+					}
+				}
 			});
 		} catch (error) {
 			logger.warn("Settings: save failed", { error: String(error) });
@@ -2159,6 +2331,9 @@ export class Settings {
 			}
 			for (const role of modifiedModelRoles) {
 				this.#modifiedGlobalModelRoles.add(role);
+			}
+			for (const policyKey of modifiedApprovalPolicies) {
+				this.#modifiedGlobalApprovalPolicies.add(policyKey);
 			}
 			this.#rebuildMerged();
 			throw error;
@@ -2190,15 +2365,19 @@ export class Settings {
 		if (
 			this.#savesCancelled ||
 			!this.#persist ||
-			(this.#modifiedProjectModelRoles.size === 0 && this.#modifiedProjectApprovalPolicies.size === 0)
+			(this.#modifiedProjectModelRoles.size === 0 &&
+				this.#modifiedProjectApprovalPolicies.size === 0 &&
+				this.#modifiedProjectPaths.size === 0)
 		)
 			return;
 
 		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
 		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
 		const modifiedApprovalPolicies = [...this.#modifiedProjectApprovalPolicies];
+		const modifiedPaths = [...this.#modifiedProjectPaths];
 		this.#modifiedProjectModelRoles.clear();
 		this.#modifiedProjectApprovalPolicies.clear();
+		this.#modifiedProjectPaths.clear();
 
 		try {
 			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
@@ -2218,6 +2397,11 @@ export class Settings {
 					const value = isRecord(projectPolicies) ? projectPolicies[policyKey] : undefined;
 					setByPath(projectSettings, ["tools", "approval", policyKey], value);
 				}
+				for (const modPath of modifiedPaths) {
+					const segments = modPath.split(".");
+					const value = getByPath(this.#project, segments);
+					setByPath(projectSettings, segments, value);
+				}
 
 				await this.#writeYamlAtomically(writePath, projectSettings);
 				this.#projectFileSettings = structuredClone(projectSettings);
@@ -2230,6 +2414,9 @@ export class Settings {
 			}
 			for (const policyKey of modifiedApprovalPolicies) {
 				this.#modifiedProjectApprovalPolicies.add(policyKey);
+			}
+			for (const modPath of modifiedPaths) {
+				this.#modifiedProjectPaths.add(modPath);
 			}
 			throw error;
 		}

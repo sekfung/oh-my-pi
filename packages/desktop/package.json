@@ -19,11 +19,13 @@
   },
   "dependencies": {
     "@fontsource-variable/geist": "catalog:",
+    "@tanstack/react-virtual": "catalog:",
     "@tauri-apps/api": "catalog:",
     "@tauri-apps/plugin-dialog": "catalog:",
     "class-variance-authority": "catalog:",
     "clsx": "catalog:",
     "lucide-react": "catalog:",
+    "mermaid": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",
     "tailwind-merge": "catalog:"

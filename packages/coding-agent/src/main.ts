@@ -1728,7 +1728,16 @@ export async function runRootCommand(
 			process.stderr.write(`${chalk.yellow("\nSet an API key environment variable:")}\n`);
 			process.stderr.write("  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n");
 			process.stderr.write(`${chalk.yellow(`\nOr create ${ModelsConfigFile.path()}`)}\n`);
-			process.exit(1);
+			// RPC hosts (the desktop sidecar, `omp gui`) have no terminal to read this
+			// from and no one to retry the spawn: exiting here just kills the sidecar
+			// out from under a connected client on every cold-cache discovery race
+			// (see the #6114/#6162 note above session.model resolution), surfacing as
+			// "sidecar exited (1)" with no recourse. Let the RPC loop start anyway —
+			// `session.model` is already optional throughout rpc-mode, and the client
+			// can recover via the `login`/`set_model` commands instead of respawning.
+			if (mode !== "rpc" && mode !== "rpc-ui") {
+				process.exit(1);
+			}
 		}
 
 		if (mode === "rpc" || mode === "rpc-ui") {

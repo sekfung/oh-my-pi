@@ -305,6 +305,70 @@ describe("Settings", () => {
 			});
 		});
 
+		it("persists and clears global-scoped tool approval policies without replacing sibling config", async () => {
+			await writeSettings({ tools: { approval: { read: "prompt" } }, custom: { keep: true } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.setGlobalApprovalPolicy("bash", "allow");
+			await settings.flush();
+			expect(await readSettings()).toEqual({
+				tools: { approval: { read: "prompt", bash: "allow" } },
+				custom: { keep: true },
+			});
+			expect(settings.get("tools.approval")).toMatchObject({ read: "prompt", bash: "allow" });
+			expect(settings.getGlobalApprovalPolicy("bash")).toBe("allow");
+
+			settings.clearGlobalApprovalPolicy("bash");
+			await settings.flush();
+			expect(await readSettings()).toEqual({
+				tools: { approval: { read: "prompt" } },
+				custom: { keep: true },
+			});
+			expect(settings.getGlobalApprovalPolicy("bash")).toBeUndefined();
+		});
+
+		it("promotes a project-scoped approval policy to global without disturbing the project's own record", async () => {
+			await writeSettings({});
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ tools: { approval: { bash: "allow" } } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.getProjectApprovalPolicy("bash")).toBe("allow");
+			settings.setGlobalApprovalPolicy("bash", "allow");
+			await settings.flush();
+
+			expect(await readSettings()).toEqual({ tools: { approval: { bash: "allow" } } });
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				tools: { approval: { bash: "allow" } },
+			});
+			expect(settings.get("tools.approval")).toMatchObject({ bash: "allow" });
+		});
+
+		it("sets and clears an arbitrary setting in project scope without touching the global config", async () => {
+			await writeSettings({ "terminal.showProgress": false });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ custom: { keep: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("terminal.showProgress")).toBe(false);
+			settings.setProject("terminal.showProgress", true);
+			expect(settings.get("terminal.showProgress")).toBe(true);
+			await settings.flush();
+
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				custom: { keep: true },
+				terminal: { showProgress: true },
+			});
+			expect(await readSettings()).toEqual({ "terminal.showProgress": false });
+
+			settings.clearProjectSetting("terminal.showProgress");
+			expect(settings.get("terminal.showProgress")).toBe(false);
+			await settings.flush();
+			// Mirrors clearOverride(): the leaf key is removed but an emptied parent
+			// container is left in place rather than pruned.
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({ custom: { keep: true }, terminal: {} });
+		});
+
 		it("preserves a symlinked main config while atomically updating its target", async () => {
 			const managedConfigPath = tempDir.join("managed-config.yml");
 			await Bun.write(managedConfigPath, YAML.stringify({ setupVersion: 1 }, null, 2));

@@ -1,5 +1,7 @@
-import { Bot, Brain, CircleUserRound, Wrench } from "lucide-react";
+import { Bot, Brain, CircleUserRound, Code2, Wrench } from "lucide-react";
 import { useState } from "react";
+import { Markdown } from "@/components/markdown";
+import { ShellCommandCard } from "@/components/shell-command-card";
 import { cn } from "@/lib/utils";
 
 interface ContentBlock {
@@ -44,8 +46,10 @@ function roleOf(message: unknown): string {
 	return isRecord(message) && typeof message.role === "string" ? message.role : "event";
 }
 
-function CollapsibleBlock({ block }: { block: ContentBlock }) {
+function CollapsibleBlock({ block, onOpenLink }: { block: ContentBlock; onOpenLink?: (url: string) => void }) {
 	const [open, setOpen] = useState(false);
+	const [raw, setRaw] = useState(false);
+
 	if (block.kind === "thinking" || block.kind === "tool" || block.kind === "unknown") {
 		const label = block.kind === "thinking" ? "Thinking" : block.kind === "tool" ? "Tool call" : "Details";
 		return (
@@ -65,10 +69,64 @@ function CollapsibleBlock({ block }: { block: ContentBlock }) {
 			</div>
 		);
 	}
+
+	if (block.kind === "text") {
+		return (
+			<div className="group/text relative text-sm">
+				<button
+					type="button"
+					title={raw ? "Show rendered" : "Show raw source"}
+					aria-label={raw ? "Show rendered" : "Show raw source"}
+					className="absolute top-0.5 right-0.5 rounded p-1 text-muted-foreground opacity-0 hover:bg-muted group-hover/text:opacity-100"
+					onClick={() => setRaw(value => !value)}
+				>
+					<Code2 className="size-3" />
+				</button>
+				{raw ? (
+					<pre className="overflow-auto rounded-lg bg-muted/30 p-2 font-mono text-xs whitespace-pre-wrap">
+						{block.text}
+					</pre>
+				) : (
+					<Markdown text={block.text} onOpenLink={onOpenLink} />
+				)}
+			</div>
+		);
+	}
+
 	return <div className="whitespace-pre-wrap break-words leading-7">{block.text}</div>;
 }
 
-export function TranscriptMessage({ message }: { message: unknown }) {
+function isBashExecutionMessage(message: unknown): message is {
+	role: "bashExecution";
+	command: string;
+	output: string;
+	exitCode?: number;
+	cancelled: boolean;
+	truncated: boolean;
+	excludeFromContext?: boolean;
+} {
+	return (
+		isRecord(message) &&
+		message.role === "bashExecution" &&
+		typeof message.command === "string" &&
+		typeof message.output === "string"
+	);
+}
+
+export function TranscriptMessage({ message, onOpenLink }: { message: unknown; onOpenLink?: (url: string) => void }) {
+	if (isBashExecutionMessage(message)) {
+		return (
+			<div className="flex justify-start">
+				<ShellCommandCard
+					command={message.command}
+					excludeFromContext={message.excludeFromContext}
+					output={message.output}
+					running={false}
+					status={{ exitCode: message.exitCode, cancelled: message.cancelled, truncated: message.truncated }}
+				/>
+			</div>
+		);
+	}
 	const role = roleOf(message);
 	const user = role === "user";
 	const toolResult = role === "toolResult" || role === "tool";
@@ -87,7 +145,7 @@ export function TranscriptMessage({ message }: { message: unknown }) {
 				)}
 			>
 				{contentBlocks(message).map((block, index) => (
-					<CollapsibleBlock key={`${block.kind}-${index}`} block={block} />
+					<CollapsibleBlock key={`${block.kind}-${index}`} block={block} onOpenLink={onOpenLink} />
 				))}
 			</div>
 			{user ? (

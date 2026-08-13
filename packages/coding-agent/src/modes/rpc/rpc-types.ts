@@ -80,8 +80,20 @@ export type RpcCommand =
 	| { id?: string; type: "abort_retry" }
 
 	// Bash
-	| { id?: string; type: "bash"; command: string }
+	| { id?: string; type: "bash"; command: string; excludeFromContext?: boolean }
 	| { id?: string; type: "abort_bash" }
+
+	// Approval policy management (global promotion/revocation; the four-state
+	// once/project choices live on the toolApproval extension UI request instead)
+	| { id?: string; type: "get_approval_policies" }
+	| {
+			id?: string;
+			type: "set_approval_policy";
+			scope: "project" | "global";
+			policyKey: string;
+			policy: "allow" | "deny";
+	  }
+	| { id?: string; type: "clear_approval_policy"; scope: "project" | "global"; policyKey: string }
 
 	// Session
 	| { id?: string; type: "get_session_stats" }
@@ -96,6 +108,20 @@ export type RpcCommand =
 	// Messages
 	| { id?: string; type: "get_messages" }
 	| { id?: string; type: "get_messages_page"; cursor?: string; limit?: number }
+
+	// Async jobs (background bash/task jobs; distinct from the queued-message queue)
+	| { id?: string; type: "get_async_jobs" }
+	| { id?: string; type: "abort_async_job"; jobId: string }
+
+	// Settings (GUI-relevant schema, global/project scope)
+	| { id?: string; type: "get_settings_schema" }
+	| { id?: string; type: "get_settings_values" }
+	| { id?: string; type: "set_setting_value"; path: string; scope: "project" | "global"; value: unknown }
+	| { id?: string; type: "clear_setting_value"; path: string; scope: "project" | "global" }
+
+	// Resources (read-only skills/prompts/plugins/MCP/agents/tools inventory)
+	| { id?: string; type: "get_resources" }
+	| { id?: string; type: "reload_resources" }
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
@@ -117,6 +143,7 @@ export interface RpcSessionState {
 	sessionId: string;
 	sessionName?: string;
 	autoCompactionEnabled: boolean;
+	autoRetryEnabled: boolean;
 	fastModeEnabled: boolean;
 	fastModeActive: boolean;
 	tokensPerSecond: number | null;
@@ -167,8 +194,110 @@ export interface RpcChunkFrame {
 	data: string;
 }
 
+/** Incremental output pushed while a `bash` command with a matching `id` is still running. */
+export interface RpcBashOutputFrame {
+	type: "bash_output";
+	id: string;
+	chunk: string;
+}
+
 export interface RpcHandoffResult {
 	savedPath?: string;
+}
+
+/** Serializable projection of an {@link AsyncJob} for RPC hosts — omits the live AbortController/Promise. */
+export interface RpcAsyncJobSummary {
+	id: string;
+	type: "bash" | "task";
+	status: "running" | "completed" | "failed" | "cancelled";
+	label: string;
+	startTime: number;
+	queued?: boolean;
+	resultText?: string;
+	errorText?: string;
+}
+
+export interface RpcSettingOption {
+	value: string;
+	label: string;
+	description?: string;
+}
+
+export interface RpcSettingDef {
+	path: string;
+	tab: string;
+	group?: string;
+	label: string;
+	description: string;
+	type: "boolean" | "string" | "number" | "enum" | "array" | "record";
+	enumValues?: readonly string[];
+	options?: readonly RpcSettingOption[] | "runtime";
+	secret?: boolean;
+}
+
+export interface RpcSettingsSchema {
+	tabs: Array<{ id: string; label: string }>;
+	groups: Record<string, readonly string[]>;
+	settings: RpcSettingDef[];
+}
+
+export interface RpcSettingValueEntry {
+	path: string;
+	/** Omitted for credential/secret settings — never sent to RPC hosts. */
+	value?: unknown;
+	/** Whether a credential/secret setting has a value configured, without revealing it. */
+	configured?: boolean;
+	scope: "project" | "global" | "default";
+}
+
+export interface RpcResourceSkill {
+	name: string;
+	description: string;
+	source: string;
+	hide?: boolean;
+}
+
+export interface RpcResourcePrompt {
+	name: string;
+	path: string;
+	sourceLevel: "user" | "project" | "native";
+	providerName: string;
+}
+
+export interface RpcResourcePlugin {
+	name: string;
+	version: string;
+	enabled: boolean;
+	enabledFeatures: string[] | null;
+}
+
+export interface RpcResourceMcpServer {
+	name: string;
+	status: "connected" | "connecting" | "disconnected";
+	toolCount?: number;
+	sourceLevel?: "user" | "project" | "native";
+}
+
+export interface RpcResourceAgent {
+	name: string;
+	description: string;
+	source: "bundled" | "user" | "project";
+}
+
+export interface RpcResourceTool {
+	name: string;
+	description: string;
+}
+
+export interface RpcResourcesSnapshot {
+	skills: RpcResourceSkill[];
+	skillWarnings: string[];
+	prompts: RpcResourcePrompt[];
+	promptWarnings: string[];
+	plugins: RpcResourcePlugin[];
+	mcpServers: RpcResourceMcpServer[];
+	agents: RpcResourceAgent[];
+	tools: RpcResourceTool[];
 }
 
 export type RpcSubagentSubscriptionLevel = "off" | "progress" | "events";
@@ -332,6 +461,20 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "bash"; success: true; data: BashResult }
 	| { id?: string; type: "response"; command: "abort_bash"; success: true }
 
+	// Approval policy management
+	| {
+			id?: string;
+			type: "response";
+			command: "get_approval_policies";
+			success: true;
+			data: {
+				project: Record<string, "allow" | "deny" | "prompt">;
+				global: Record<string, "allow" | "deny" | "prompt">;
+			};
+	  }
+	| { id?: string; type: "response"; command: "set_approval_policy"; success: true }
+	| { id?: string; type: "response"; command: "clear_approval_policy"; success: true }
+
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
@@ -357,6 +500,26 @@ export type RpcResponse =
 	// Messages
 	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
 	| { id?: string; type: "response"; command: "get_messages_page"; success: true; data: RpcMessagesPage }
+
+	// Async jobs
+	| { id?: string; type: "response"; command: "get_async_jobs"; success: true; data: { jobs: RpcAsyncJobSummary[] } }
+	| { id?: string; type: "response"; command: "abort_async_job"; success: true; data: { cancelled: boolean } }
+
+	// Settings
+	| { id?: string; type: "response"; command: "get_settings_schema"; success: true; data: RpcSettingsSchema }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_settings_values";
+			success: true;
+			data: { values: RpcSettingValueEntry[] };
+	  }
+	| { id?: string; type: "response"; command: "set_setting_value"; success: true }
+	| { id?: string; type: "response"; command: "clear_setting_value"; success: true }
+
+	// Resources
+	| { id?: string; type: "response"; command: "get_resources"; success: true; data: RpcResourcesSnapshot }
+	| { id?: string; type: "response"; command: "reload_resources"; success: true }
 
 	// Login
 	| {

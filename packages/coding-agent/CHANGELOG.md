@@ -8,6 +8,11 @@
 
 ### Added
 
+- Added streaming `bash_output` push frames and `excludeFromContext`/user-shell parity to the RPC `bash` command, so RPC hosts (the desktop sidecar) can render a live-updating shell command card instead of blocking until the command exits.
+- Added `Settings#setGlobalApprovalPolicy`/`clearGlobalApprovalPolicy`/`getGlobalApprovalPolicies` (mirroring the existing project-scoped methods, with the same re-read-and-merge save path as global model roles) and the RPC `get_approval_policies`/`set_approval_policy`/`clear_approval_policy` commands, so a tool-approval decision can be promoted from one project to every project, or revoked, without hand-editing config.
+- Added the RPC `get_async_jobs`/`abort_async_job` commands (a serializable projection of `AsyncJobManager`'s background bash/task jobs) and `autoRetryEnabled` to `get_state`, so RPC hosts can show and cancel background jobs and reflect the auto-retry toggle alongside the existing todo/context-usage/compaction fields.
+- Added `Settings#setProject`/`clearProjectSetting`/`getProjectValue`/`getGlobalValue`, generalizing the existing per-key project-scoped writers (model roles, approval policies) to any `SettingPath` with the same re-read-and-merge save path. Added the RPC `get_settings_schema`/`get_settings_values`/`set_setting_value`/`clear_setting_value` commands, exposing every GUI-relevant setting (from `settings-schema.ts`, credentials redacted to a `configured` flag) with its resolved project/global/default scope.
+- Added the RPC `get_resources`/`reload_resources` commands: a read-only inventory of skills, prompts, plugins, MCP servers, configured subagents, and loaded tools, plus a reload that re-resolves plugin roots, capabilities, skills, and slash commands (reusing the same routine `prompt`'s `/reload`-style flow already used).
 - Added the authoritative desktop application projection with native session and queue management, project-scoped four-state tool approvals for RPC hosts, and the `omp gui --project <path>` desktop launcher.
 - Added desktop session clone, fork, import, and export intents, a journal session-tree projection with navigation, labeling, and fork-from-entry, and a read-only Files/Changes workspace review command.
 - Added Astral `ty` as a built-in fallback Python LSP server (`ty server`), ordered behind `pyright`, `basedpyright`, and `pylsp`.
@@ -28,6 +33,7 @@
 - Fixed LSP `diagnostics` incorrectly reporting success when all language servers failed.
 - Fixed Hindsight memory scoping splitting repositories across multiple scopes on case-sensitive filesystems by lowercasing the project label.
 - Fixed the CLI crashing at startup with a raw `AuthBrokerError` when the configured auth broker is unreachable, replacing it with an actionable error message.
+- Fixed the RPC/desktop sidecar exiting with code 1 whenever startup model resolution came up empty (a cold-cache discovery race, transient auth refresh failure, etc.), silently killing the connected client's session; it now stays up and lets the client recover via `login`/`set_model`.
 - Fixed various resource and process leaks, including idle launch brokers staying alive indefinitely, stale MCP connections leaving child processes open, and undrained stdout in DAP `runInTerminal` requests.
 - Fixed custom STB-backed vision providers failing to decode WebP images by automatically detecting image formats from bytes and normalizing WebP blocks.
 - Fixed command-backed provider API keys (`!command`) staying pinned to cached values after receiving an HTTP 401 error.

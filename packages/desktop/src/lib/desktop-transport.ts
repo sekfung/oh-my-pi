@@ -17,7 +17,7 @@ export interface DesktopSidecarExit {
 
 export interface DesktopTransport {
 	open(projectPath: string): Promise<void>;
-	request(command: DesktopRpcCommand): Promise<DesktopRpcResponse>;
+	request(command: DesktopRpcCommand, options?: { id?: string }): Promise<DesktopRpcResponse>;
 	respond(response: DesktopHostInteractionResponse): Promise<void>;
 	onFrame(listener: (frame: DesktopRpcFrame) => void): () => void;
 	onExit(listener: (exit: DesktopSidecarExit) => void): () => void;
@@ -93,8 +93,8 @@ export class TauriSidecarTransport implements DesktopTransport {
 		await withTimeout(this.#ready.promise, 30_000, "Oh My Pi sidecar did not become ready");
 	}
 
-	async request(command: DesktopRpcCommand): Promise<DesktopRpcResponse> {
-		const id = `desktop-${++this.#requestId}`;
+	async request(command: DesktopRpcCommand, options?: { id?: string }): Promise<DesktopRpcResponse> {
+		const id = options?.id ?? `desktop-${++this.#requestId}`;
 		const pending = Promise.withResolvers<DesktopRpcResponse>();
 		this.#pending.set(id, pending);
 		try {

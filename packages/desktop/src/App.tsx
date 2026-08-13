@@ -2,10 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
-	Bot,
+	Blocks,
 	Check,
 	ChevronDown,
 	CopyPlus,
+	Cpu,
 	Download,
 	Files,
 	FolderGit2,
@@ -14,6 +15,7 @@ import {
 	GitCompareArrows,
 	GitFork,
 	ImagePlus,
+	ListChecks,
 	ListOrdered,
 	LoaderCircle,
 	MessageSquareText,
@@ -24,7 +26,9 @@ import {
 	RotateCcw,
 	Send,
 	Settings2,
+	ShieldCheck,
 	Square,
+	SquareSlash,
 	Sun,
 	TerminalSquare,
 	Trash2,
@@ -34,23 +38,48 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import appIcon from "@/assets/app-icon-ui.png";
+import { ApprovalsInspector } from "@/components/approvals-inspector";
+import { CommandPalette, type PaletteAction } from "@/components/command-palette";
+import { ComposerSuggestions } from "@/components/composer-suggestions";
+import { ContextInspector } from "@/components/context-inspector";
 import { HostInteraction } from "@/components/host-interaction";
+import { ModelPicker } from "@/components/model-picker";
+import { ResourcesInspector } from "@/components/resources-inspector";
 import { SessionTree } from "@/components/session-tree";
-import { TranscriptMessage } from "@/components/transcript-message";
+import { SettingsInspector } from "@/components/settings-inspector";
+import { ThinkingMenu } from "@/components/thinking-menu";
+import { Transcript } from "@/components/transcript";
 import { Button } from "@/components/ui/button";
 import { ChangesInspector, FilesInspector } from "@/components/workspace-review";
 import {
 	type DesktopApplicationIntent,
 	type DesktopApplicationSnapshot,
+	type DesktopApprovalPolicies,
+	type DesktopAsyncJob,
+	type DesktopAvailableModel,
+	type DesktopContextState,
 	type DesktopHostInteraction,
 	type DesktopImageContent,
 	type DesktopQueuedMessage,
+	type DesktopResourcesSnapshot,
 	type DesktopSessionState,
+	type DesktopSettingsSchema,
+	type DesktopSettingValueEntry,
+	type DesktopSlashCommand,
 	type DesktopWorkspaceReview,
+	isBashOutput,
 	isHostInteraction,
 	readApplicationIntentResult,
 	readApplicationSnapshot,
+	readApprovalPolicies,
+	readAsyncJobs,
+	readAvailableModels,
+	readContextState,
 	readMessages,
+	readResourcesSnapshot,
+	readSettingsSchema,
+	readSettingValues,
+	readSlashCommands,
 	readWorkspaceReview,
 } from "@/lib/desktop-protocol";
 import type { DesktopRpcCommand } from "@/lib/desktop-transport";
@@ -61,7 +90,14 @@ const RECENT_PROJECTS_KEY = "omp.desktop.recent-projects";
 const APPEARANCE_KEY = "omp.desktop.appearance";
 
 type ConnectionStatus = "empty" | "connecting" | "connected" | "recovering" | "disconnected";
-type Inspector = "tree" | "files" | "changes" | "tasks" | "diagnostics";
+type Inspector = "tree" | "files" | "changes" | "approvals" | "context" | "settings" | "resources" | "diagnostics";
+
+interface ShellRunState {
+	id: string;
+	command: string;
+	excludeFromContext: boolean;
+	output: string;
+}
 
 function loadRecentProjects(): string[] {
 	try {
@@ -75,6 +111,15 @@ function loadRecentProjects(): string[] {
 function projectName(projectPath: string): string {
 	const parts = projectPath.replaceAll("\\", "/").split("/").filter(Boolean);
 	return parts.at(-1) ?? projectPath;
+}
+
+/** The `@token` immediately before `cursor`, if any — drives file/path mention completion. */
+function currentAtToken(text: string, cursor: number): { start: number; query: string } | undefined {
+	const before = text.slice(0, cursor);
+	const match = /(?:^|\s)@(\S*)$/.exec(before);
+	if (!match) return undefined;
+	const query = match[1] ?? "";
+	return { start: cursor - query.length - 1, query };
 }
 
 async function imageContent(file: File): Promise<DesktopImageContent> {
@@ -108,9 +153,32 @@ export default function App() {
 	const [messages, setMessages] = useState<unknown[]>([]);
 	const [review, setReview] = useState<DesktopWorkspaceReview>();
 	const [reviewLoading, setReviewLoading] = useState(false);
+	const [approvalPolicies, setApprovalPolicies] = useState<DesktopApprovalPolicies>();
+	const [contextState, setContextState] = useState<DesktopContextState>();
+	const [asyncJobs, setAsyncJobs] = useState<DesktopAsyncJob[]>();
+	const [contextLoading, setContextLoading] = useState(false);
+	const [settingsSchema, setSettingsSchema] = useState<DesktopSettingsSchema>();
+	const [settingValues, setSettingValues] = useState<DesktopSettingValueEntry[]>();
+	const [settingsLoading, setSettingsLoading] = useState(false);
+	const [resources, setResources] = useState<DesktopResourcesSnapshot>();
+	const [resourcesLoading, setResourcesLoading] = useState(false);
+	const [approvalsLoading, setApprovalsLoading] = useState(false);
 	const [draft, setDraft] = useState("");
 	const [images, setImages] = useState<Array<DesktopImageContent & { name: string }>>([]);
 	const [delivery, setDelivery] = useState<"steer" | "followUp">("followUp");
+	const [shellRun, setShellRun] = useState<ShellRunState>();
+	const [slashCommands, setSlashCommands] = useState<DesktopSlashCommand[]>([]);
+	const [promptHistory, setPromptHistory] = useState<string[]>([]);
+	const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+	const [historyDraft, setHistoryDraft] = useState("");
+	const [cursorPos, setCursorPos] = useState(0);
+	const [autocompleteDismissed, setAutocompleteDismissed] = useState(false);
+	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const [availableModels, setAvailableModels] = useState<DesktopAvailableModel[]>();
+	const [modelsLoading, setModelsLoading] = useState(false);
+	const [modelPickerOpen, setModelPickerOpen] = useState(false);
+	const [paletteOpen, setPaletteOpen] = useState(false);
+	const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
 	const [interaction, setInteraction] = useState<DesktopHostInteraction>();
 	const [error, setError] = useState<string>();
 	const [notice, setNotice] = useState<string>();
@@ -124,6 +192,9 @@ export default function App() {
 	});
 	const [systemDark, setSystemDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
 	const dark = appearance === "dark" || (appearance === "system" && systemDark);
+	const currentModelEntry = availableModels?.find(
+		model => model.provider === session?.model?.provider && model.id === session?.model?.id,
+	);
 
 	const refresh = useCallback(async () => {
 		const [applicationResponse, messagesResponse] = await Promise.all([
@@ -155,6 +226,132 @@ export default function App() {
 			setReviewLoading(false);
 		}
 	}, [transport]);
+
+	const refreshApprovals = useCallback(async () => {
+		setApprovalsLoading(true);
+		try {
+			const response = await transport.request({ type: "get_approval_policies" });
+			if (!response.success) throw new Error(response.error);
+			if (response.command !== "get_approval_policies") throw new Error("Unexpected approvals response");
+			setApprovalPolicies(readApprovalPolicies(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setApprovalsLoading(false);
+		}
+	}, [transport]);
+
+	const refreshContext = useCallback(async () => {
+		setContextLoading(true);
+		try {
+			const [stateResponse, jobsResponse] = await Promise.all([
+				transport.request({ type: "get_state" }),
+				transport.request({ type: "get_async_jobs" }),
+			]);
+			if (!stateResponse.success) throw new Error(stateResponse.error);
+			if (stateResponse.command !== "get_state") throw new Error("Unexpected state response");
+			setContextState(readContextState(stateResponse.data));
+			if (!jobsResponse.success) throw new Error(jobsResponse.error);
+			if (jobsResponse.command !== "get_async_jobs") throw new Error("Unexpected async jobs response");
+			setAsyncJobs(readAsyncJobs(jobsResponse.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setContextLoading(false);
+		}
+	}, [transport]);
+
+	const refreshSettings = useCallback(async () => {
+		setSettingsLoading(true);
+		try {
+			const requests = [transport.request({ type: "get_settings_values" })];
+			if (!settingsSchema) requests.unshift(transport.request({ type: "get_settings_schema" }));
+			const responses = await Promise.all(requests);
+			for (const response of responses) {
+				if (!response.success) throw new Error(response.error);
+				if (response.command === "get_settings_schema") setSettingsSchema(readSettingsSchema(response.data));
+				else if (response.command === "get_settings_values") setSettingValues(readSettingValues(response.data));
+			}
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setSettingsLoading(false);
+		}
+	}, [transport, settingsSchema]);
+
+	const refreshResources = useCallback(async () => {
+		setResourcesLoading(true);
+		try {
+			const response = await transport.request({ type: "get_resources" });
+			if (!response.success) throw new Error(response.error);
+			if (response.command !== "get_resources") throw new Error("Unexpected resources response");
+			setResources(readResourcesSnapshot(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setResourcesLoading(false);
+		}
+	}, [transport]);
+
+	const reloadResources = async () => {
+		try {
+			const response = await transport.request({ type: "reload_resources" });
+			if (!response.success) throw new Error(response.error);
+			await refreshResources();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const slashMatches = useMemo(() => {
+		if (autocompleteDismissed || !/^\/[a-zA-Z0-9_-]*$/.test(draft)) return [];
+		const query = draft.slice(1).toLowerCase();
+		return slashCommands.filter(command => command.name.toLowerCase().startsWith(query)).slice(0, 8);
+	}, [autocompleteDismissed, draft, slashCommands]);
+
+	const atToken = useMemo(() => currentAtToken(draft, cursorPos), [draft, cursorPos]);
+
+	const fileMatches = useMemo(() => {
+		if (autocompleteDismissed || !atToken || !review) return [];
+		const query = atToken.query.toLowerCase();
+		return (query ? review.files.filter(file => file.path.toLowerCase().includes(query)) : review.files).slice(0, 8);
+	}, [atToken, autocompleteDismissed, review]);
+
+	const activeMenu: "slash" | "file" | undefined =
+		slashMatches.length > 0 ? "slash" : fileMatches.length > 0 ? "file" : undefined;
+
+	const [highlightIndex, setHighlightIndex] = useState(0);
+
+	useEffect(() => {
+		setHighlightIndex(0);
+		setAutocompleteDismissed(false);
+	}, [draft]);
+
+	useEffect(() => {
+		if (atToken && !review && status === "connected") void refreshReview();
+	}, [atToken, review, status, refreshReview]);
+
+	const applySlashCommand = (command: DesktopSlashCommand) => {
+		const next = `/${command.name} `;
+		setDraft(next);
+		requestAnimationFrame(() => {
+			textareaRef.current?.focus();
+			textareaRef.current?.setSelectionRange(next.length, next.length);
+		});
+	};
+
+	const applyFileMention = (filePath: string) => {
+		if (!atToken) return;
+		const before = draft.slice(0, atToken.start);
+		const after = draft.slice(cursorPos);
+		const next = `${before}@${filePath} ${after}`;
+		setDraft(next);
+		const nextCursor = before.length + filePath.length + 2;
+		requestAnimationFrame(() => {
+			textareaRef.current?.focus();
+			textareaRef.current?.setSelectionRange(nextCursor, nextCursor);
+		});
+	};
 
 	const connect = useCallback(
 		async (path: string, recovering = false) => {
@@ -192,8 +389,35 @@ export default function App() {
 	}, []);
 
 	useEffect(() => {
+		const onKeyDown = (event: KeyboardEvent) => {
+			if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+				event.preventDefault();
+				setPaletteOpen(value => !value);
+			}
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, []);
+
+	useEffect(() => {
 		if ((inspector === "files" || inspector === "changes") && status === "connected") void refreshReview();
 	}, [inspector, status, refreshReview]);
+
+	useEffect(() => {
+		if (inspector === "approvals" && status === "connected") void refreshApprovals();
+	}, [inspector, status, refreshApprovals]);
+
+	useEffect(() => {
+		if (inspector === "context" && status === "connected") void refreshContext();
+	}, [inspector, status, refreshContext]);
+
+	useEffect(() => {
+		if (inspector === "settings" && status === "connected") void refreshSettings();
+	}, [inspector, status, refreshSettings]);
+
+	useEffect(() => {
+		if (inspector === "resources" && status === "connected") void refreshResources();
+	}, [inspector, status, refreshResources]);
 
 	useEffect(() => {
 		let stopOpenProject: (() => void) | undefined;
@@ -203,15 +427,19 @@ export default function App() {
 			else stopOpenProject = unlisten;
 		});
 		const stopFrames = transport.onFrame(frame => {
+			if (isBashOutput(frame)) {
+				setShellRun(current =>
+					current?.id === frame.id ? { ...current, output: current.output + frame.chunk } : current,
+				);
+				return;
+			}
 			if (isHostInteraction(frame)) {
 				if (frame.method === "cancel") {
 					setInteraction(current => (current?.id === frame.targetId ? undefined : current));
 				} else if (frame.method === "notify") {
 					setNotice(frame.message);
 				} else if (frame.method === "open_url") {
-					void invoke("open_external_url", { url: frame.launchUrl ?? frame.url }).catch(cause =>
-						setError(cause instanceof Error ? cause.message : String(cause)),
-					);
+					openExternalUrl(frame.launchUrl ?? frame.url);
 				} else if (
 					frame.method === "select" ||
 					frame.method === "toolApproval" ||
@@ -248,6 +476,8 @@ export default function App() {
 				setMessages(current => (current.length === 0 ? [frame.message] : [...current.slice(0, -1), frame.message]));
 			} else if (frame.type === "notice" && "message" in frame && typeof frame.message === "string") {
 				setNotice(frame.message);
+			} else if (frame.type === "available_commands_update" && "commands" in frame) {
+				setSlashCommands(readSlashCommands(frame.commands));
 			} else if (
 				frame.type === "agent_end" ||
 				frame.type === "model_changed" ||
@@ -285,10 +515,28 @@ export default function App() {
 		if (selected) await connect(selected);
 	};
 
+	const pushPromptHistory = (text: string) => {
+		if (!text.trim()) return;
+		setPromptHistory(current => (current.at(-1) === text ? current : [...current, text].slice(-100)));
+		setHistoryIndex(null);
+		setHistoryDraft("");
+	};
+
 	const send = async () => {
 		const text = draft.trim();
 		if (!text && images.length === 0) return;
+		if (images.length === 0 && text.startsWith("!")) {
+			const excludeFromContext = text.startsWith("!!");
+			const command = text.slice(excludeFromContext ? 2 : 1).trim();
+			if (command) {
+				setDraft("");
+				pushPromptHistory(text);
+				await runShellCommand(command, excludeFromContext);
+				return;
+			}
+		}
 		setDraft("");
+		pushPromptHistory(text);
 		const attachments = images.map(({ name: _name, ...image }) => image);
 		setImages([]);
 		try {
@@ -303,6 +551,117 @@ export default function App() {
 			await refresh();
 		} catch (cause) {
 			setDraft(text);
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const runShellCommand = async (command: string, excludeFromContext: boolean) => {
+		const id = crypto.randomUUID();
+		setShellRun({ id, command, excludeFromContext, output: "" });
+		try {
+			const response = await transport.request({ type: "bash", command, excludeFromContext }, { id });
+			if (!response.success) throw new Error(response.error);
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setShellRun(current => (current?.id === id ? undefined : current));
+		}
+	};
+
+	const ensureModelsLoaded = async () => {
+		if (availableModels || modelsLoading) return;
+		setModelsLoading(true);
+		try {
+			const response = await transport.request({ type: "get_available_models" });
+			if (!response.success) throw new Error(response.error);
+			setAvailableModels(readAvailableModels(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setModelsLoading(false);
+		}
+	};
+
+	const openModelPicker = () => {
+		setModelPickerOpen(true);
+		void ensureModelsLoaded();
+	};
+
+	const selectModel = async (model: DesktopAvailableModel) => {
+		setModelPickerOpen(false);
+		try {
+			const response = await transport.request({ type: "set_model", provider: model.provider, modelId: model.id });
+			if (!response.success) throw new Error(response.error);
+			await refresh();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const toggleThinkingMenu = () => {
+		setThinkingMenuOpen(value => !value);
+		void ensureModelsLoaded();
+	};
+
+	const selectThinkingLevel = async (level: string) => {
+		setThinkingMenuOpen(false);
+		try {
+			const response = await transport.request({ type: "set_thinking_level", level });
+			if (!response.success) throw new Error(response.error);
+			await refresh();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const promoteApprovalPolicy = async (policyKey: string) => {
+		const policy = approvalPolicies?.project[policyKey];
+		if (policy !== "allow" && policy !== "deny") return;
+		try {
+			const response = await transport.request({ type: "set_approval_policy", scope: "global", policyKey, policy });
+			if (!response.success) throw new Error(response.error);
+			await refreshApprovals();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const clearApprovalPolicy = async (scope: "project" | "global", policyKey: string) => {
+		try {
+			const response = await transport.request({ type: "clear_approval_policy", scope, policyKey });
+			if (!response.success) throw new Error(response.error);
+			await refreshApprovals();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const runContextCommand = async (command: DesktopRpcCommand) => {
+		try {
+			const response = await transport.request(command);
+			if (!response.success) throw new Error(response.error);
+			await refreshContext();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const setSettingValue = async (path: string, scope: "project" | "global", value: unknown) => {
+		try {
+			const response = await transport.request({ type: "set_setting_value", path, scope, value });
+			if (!response.success) throw new Error(response.error);
+			await refreshSettings();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const resetSettingValue = async (path: string, scope: "project" | "global") => {
+		try {
+			const response = await transport.request({ type: "clear_setting_value", path, scope });
+			if (!response.success) throw new Error(response.error);
+			await refreshSettings();
+		} catch (cause) {
 			setError(cause instanceof Error ? cause.message : String(cause));
 		}
 	};
@@ -400,7 +759,13 @@ export default function App() {
 		);
 	};
 
-	const addImages = async (files: FileList | null) => {
+	const openExternalUrl = (url: string) => {
+		void invoke("open_external_url", { url }).catch(cause =>
+			setError(cause instanceof Error ? cause.message : String(cause)),
+		);
+	};
+
+	const addImages = async (files: Iterable<File> | FileList | null) => {
 		if (!files) return;
 		try {
 			const next = await Promise.all(
@@ -417,6 +782,93 @@ export default function App() {
 		setAppearance(next);
 		localStorage.setItem(APPEARANCE_KEY, next);
 	};
+
+	const paletteActions = useMemo((): PaletteAction[] => {
+		const commandActions: PaletteAction[] = slashCommands.map(command => ({
+			id: `command:${command.name}`,
+			label: `/${command.name}`,
+			hint: command.description ?? command.hint,
+			icon: SquareSlash,
+			group: "Commands",
+			run: () => applySlashCommand(command),
+		}));
+		const operations: PaletteAction[] = [
+			{
+				id: "op:choose-project",
+				label: "Choose project folder…",
+				icon: FolderOpen,
+				group: "Operations",
+				run: () => void chooseProject(),
+			},
+			{
+				id: "op:new-session",
+				label: "New session",
+				icon: Plus,
+				group: "Operations",
+				run: () => void runIntent({ type: "new_session" }),
+			},
+			{
+				id: "op:select-model",
+				label: "Select model…",
+				icon: Cpu,
+				group: "Operations",
+				run: openModelPicker,
+			},
+			{
+				id: "op:session-tree",
+				label: "Open session tree",
+				icon: GitBranch,
+				group: "Operations",
+				run: () => setInspector("tree"),
+			},
+			{
+				id: "op:files",
+				label: "Open Files",
+				icon: Files,
+				group: "Operations",
+				run: () => setInspector("files"),
+			},
+			{
+				id: "op:changes",
+				label: "Open Changes",
+				icon: GitCompareArrows,
+				group: "Operations",
+				run: () => setInspector("changes"),
+			},
+			{
+				id: "op:approvals",
+				label: "Open Approvals",
+				icon: ShieldCheck,
+				group: "Operations",
+				run: () => setInspector("approvals"),
+			},
+			{
+				id: "op:diagnostics",
+				label: "Open Diagnostics",
+				icon: TerminalSquare,
+				group: "Operations",
+				run: () => setInspector("diagnostics"),
+			},
+			{
+				id: "op:appearance",
+				label: "Toggle appearance",
+				hint: appearance,
+				icon: dark ? Sun : Moon,
+				group: "Operations",
+				run: cycleAppearance,
+			},
+		];
+		if (session?.isStreaming) {
+			operations.push({
+				id: "op:abort",
+				label: "Abort the current turn",
+				icon: Square,
+				group: "Operations",
+				run: () => void run({ type: "abort" }),
+			});
+		}
+		return [...commandActions, ...operations];
+	}, [slashCommands, appearance, dark, session?.isStreaming]);
 
 	if (!project && status !== "connecting") {
 		return (
@@ -679,13 +1131,25 @@ export default function App() {
 						<GitCompareArrows />
 						Changes
 					</button>
+					<button type="button" className="sidebar-action" onClick={() => setInspector("approvals")}>
+						<ShieldCheck />
+						Approvals
+					</button>
+					<button type="button" className="sidebar-action" onClick={() => setInspector("context")}>
+						<ListChecks />
+						Context
+					</button>
+					<button type="button" className="sidebar-action" onClick={() => setInspector("settings")}>
+						<Settings2 />
+						Settings
+					</button>
+					<button type="button" className="sidebar-action" onClick={() => setInspector("resources")}>
+						<Blocks />
+						Resources
+					</button>
 					<button type="button" className="sidebar-action" onClick={() => setInspector("diagnostics")}>
 						<TerminalSquare />
 						Diagnostics
-					</button>
-					<button type="button" className="sidebar-action" onClick={() => setInspector("tasks")}>
-						<Settings2 />
-						Settings
 					</button>
 				</div>
 			</aside>
@@ -706,12 +1170,32 @@ export default function App() {
 						</p>
 					</div>
 					<div className="ml-auto flex items-center gap-1">
-						<Button variant="ghost" size="sm" onClick={() => run({ type: "cycle_model" })}>
-							Model
+						<Button
+							variant="ghost"
+							size="sm"
+							className="gap-1.5 text-muted-foreground"
+							onClick={() => setPaletteOpen(true)}
+							title="Command palette"
+						>
+							<SquareSlash className="size-3.5" />
+							<span className="text-[10px]">⌘K</span>
 						</Button>
-						<Button variant="ghost" size="sm" onClick={() => run({ type: "cycle_thinking_level" })}>
-							{session?.thinkingLevel ?? "Thinking"}
+						<Button variant="ghost" size="sm" onClick={openModelPicker}>
+							{session?.model ? (session.model.name ?? session.model.id) : "Model"}
 						</Button>
+						<div className="relative">
+							<Button variant="ghost" size="sm" className="capitalize" onClick={toggleThinkingMenu}>
+								{session?.thinkingLevel ?? "Thinking"}
+							</Button>
+							{thinkingMenuOpen ? (
+								<ThinkingMenu
+									levels={currentModelEntry?.thinkingEfforts}
+									current={session?.thinkingLevel}
+									onSelect={level => void selectThinkingLevel(level)}
+									onClose={() => setThinkingMenuOpen(false)}
+								/>
+							) : null}
+						</div>
 						<Button variant="ghost" size="icon" onClick={cycleAppearance} title="Change appearance">
 							{dark ? <Moon /> : <Sun />}
 						</Button>
@@ -726,26 +1210,14 @@ export default function App() {
 					</div>
 				</header>
 
-				<div className="col-start-1 min-h-0 overflow-y-auto" aria-live="polite">
-					<div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-7 px-6 py-10">
-						{messages.length === 0 ? (
-							<div className="my-auto text-center">
-								<Bot className="mx-auto size-8 text-muted-foreground" />
-								<h2 className="mt-3 text-lg font-medium">What should we work on?</h2>
-								<p className="mt-1 text-sm text-muted-foreground">
-									Ask Oh My Pi to understand, change, test, or review this project.
-								</p>
-							</div>
-						) : (
-							messages.map((message, index) => <TranscriptMessage key={index} message={message} />)
-						)}
-						{status === "recovering" ? (
-							<div className="flex items-center gap-2 text-sm text-muted-foreground">
-								<LoaderCircle className="animate-spin" />
-								Restoring persisted session…
-							</div>
-						) : null}
-					</div>
+				<div className="col-start-1 min-h-0">
+					<Transcript
+						messages={messages}
+						shellRun={shellRun}
+						recovering={status === "recovering"}
+						onAbortBash={() => void run({ type: "abort_bash" })}
+						onOpenLink={openExternalUrl}
+					/>
 				</div>
 
 				<div className="col-start-1 px-5 pb-5">
@@ -818,7 +1290,40 @@ export default function App() {
 							) : null}
 						</div>
 					) : null}
-					<div className="composer mx-auto max-w-3xl">
+					<div
+						className="composer relative mx-auto max-w-3xl"
+						onDragOver={event => {
+							if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+						}}
+						onDrop={event => {
+							const dropped = [...(event.dataTransfer?.files ?? [])].filter(file =>
+								file.type.startsWith("image/"),
+							);
+							if (dropped.length > 0) {
+								event.preventDefault();
+								void addImages(dropped);
+							}
+						}}
+					>
+						{activeMenu ? (
+							<ComposerSuggestions
+								items={
+									activeMenu === "slash"
+										? slashMatches.map(command => ({
+												key: command.name,
+												label: `/${command.name}`,
+												hint: command.description ?? command.hint,
+											}))
+										: fileMatches.map(file => ({ key: file.path, label: file.path }))
+								}
+								activeIndex={highlightIndex}
+								onHover={setHighlightIndex}
+								onSelect={index => {
+									if (activeMenu === "slash") applySlashCommand(slashMatches[index]);
+									else applyFileMention(fileMatches[index].path);
+								}}
+							/>
+						) : null}
 						{images.length > 0 ? (
 							<div className="flex flex-wrap gap-2 px-3 pt-3">
 								{images.map((image, index) => (
@@ -836,12 +1341,82 @@ export default function App() {
 							</div>
 						) : null}
 						<textarea
+							ref={textareaRef}
 							value={draft}
-							onChange={event => setDraft(event.target.value)}
+							onChange={event => {
+								setDraft(event.target.value);
+								setCursorPos(event.target.selectionStart ?? event.target.value.length);
+								setHistoryIndex(null);
+							}}
+							onKeyUp={event => setCursorPos(event.currentTarget.selectionStart ?? 0)}
+							onClick={event => setCursorPos(event.currentTarget.selectionStart ?? 0)}
+							onPaste={event => {
+								const items = event.clipboardData?.items;
+								if (!items) return;
+								const pastedImages = [...items]
+									.filter(item => item.kind === "file" && item.type.startsWith("image/"))
+									.map(item => item.getAsFile())
+									.filter((file): file is File => file !== null);
+								if (pastedImages.length > 0) {
+									event.preventDefault();
+									void addImages(pastedImages);
+								}
+							}}
 							onKeyDown={event => {
+								if (activeMenu) {
+									const items = activeMenu === "slash" ? slashMatches : fileMatches;
+									if (event.key === "ArrowDown") {
+										event.preventDefault();
+										setHighlightIndex(index => (index + 1) % items.length);
+										return;
+									}
+									if (event.key === "ArrowUp") {
+										event.preventDefault();
+										setHighlightIndex(index => (index - 1 + items.length) % items.length);
+										return;
+									}
+									if (event.key === "Tab" || event.key === "Enter") {
+										event.preventDefault();
+										if (activeMenu === "slash") applySlashCommand(slashMatches[highlightIndex]);
+										else applyFileMention(fileMatches[highlightIndex].path);
+										return;
+									}
+									if (event.key === "Escape") {
+										event.preventDefault();
+										setAutocompleteDismissed(true);
+										return;
+									}
+								}
 								if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
 									event.preventDefault();
 									void send();
+									return;
+								}
+								if (!activeMenu && event.key === "ArrowUp" && (draft === "" || historyIndex !== null)) {
+									if (promptHistory.length === 0) return;
+									event.preventDefault();
+									if (historyIndex === null) {
+										setHistoryDraft(draft);
+										const nextIndex = promptHistory.length - 1;
+										setHistoryIndex(nextIndex);
+										setDraft(promptHistory[nextIndex]);
+									} else if (historyIndex > 0) {
+										const nextIndex = historyIndex - 1;
+										setHistoryIndex(nextIndex);
+										setDraft(promptHistory[nextIndex]);
+									}
+									return;
+								}
+								if (!activeMenu && event.key === "ArrowDown" && historyIndex !== null) {
+									event.preventDefault();
+									if (historyIndex < promptHistory.length - 1) {
+										const nextIndex = historyIndex + 1;
+										setHistoryIndex(nextIndex);
+										setDraft(promptHistory[nextIndex]);
+									} else {
+										setHistoryIndex(null);
+										setDraft(historyDraft);
+									}
 								}
 							}}
 							placeholder={
@@ -849,7 +1424,7 @@ export default function App() {
 									? delivery === "steer"
 										? "Steer the current turn…"
 										: "Queue a follow-up…"
-									: "Ask Oh My Pi…"
+									: "Ask Oh My Pi… (/ commands, @ files, ! shell)"
 							}
 							className="min-h-20 max-h-56 w-full resize-none bg-transparent px-4 pt-3 text-sm leading-6 outline-none placeholder:text-muted-foreground"
 							disabled={status !== "connected"}
@@ -919,6 +1494,46 @@ export default function App() {
 									Refresh
 								</Button>
 							) : null}
+							{inspector === "approvals" && status === "connected" ? (
+								<Button
+									className="ml-auto mr-2"
+									variant="ghost"
+									size="sm"
+									onClick={() => void refreshApprovals()}
+								>
+									Refresh
+								</Button>
+							) : null}
+							{inspector === "context" && status === "connected" ? (
+								<Button
+									className="ml-auto mr-2"
+									variant="ghost"
+									size="sm"
+									onClick={() => void refreshContext()}
+								>
+									Refresh
+								</Button>
+							) : null}
+							{inspector === "settings" && status === "connected" ? (
+								<Button
+									className="ml-auto mr-2"
+									variant="ghost"
+									size="sm"
+									onClick={() => void refreshSettings()}
+								>
+									Refresh
+								</Button>
+							) : null}
+							{inspector === "resources" && status === "connected" ? (
+								<Button
+									className="ml-auto mr-2"
+									variant="ghost"
+									size="sm"
+									onClick={() => void refreshResources()}
+								>
+									Refresh
+								</Button>
+							) : null}
 							<Button className="ml-auto" variant="ghost" size="sm" onClick={() => setInspector(undefined)}>
 								Close
 							</Button>
@@ -949,6 +1564,40 @@ export default function App() {
 										</div>
 									</div>
 								)
+							) : inspector === "approvals" ? (
+								<ApprovalsInspector
+									policies={approvalPolicies}
+									loading={approvalsLoading}
+									onPromote={policyKey => void promoteApprovalPolicy(policyKey)}
+									onClear={(scope, policyKey) => void clearApprovalPolicy(scope, policyKey)}
+								/>
+							) : inspector === "context" ? (
+								<ContextInspector
+									context={contextState}
+									jobs={asyncJobs}
+									loading={contextLoading}
+									onCompact={() => void runContextCommand({ type: "compact" })}
+									onToggleAutoCompaction={enabled =>
+										void runContextCommand({ type: "set_auto_compaction", enabled })
+									}
+									onToggleAutoRetry={enabled => void runContextCommand({ type: "set_auto_retry", enabled })}
+									onAbortRetry={() => void runContextCommand({ type: "abort_retry" })}
+									onAbortJob={jobId => void runContextCommand({ type: "abort_async_job", jobId })}
+								/>
+							) : inspector === "settings" ? (
+								<SettingsInspector
+									schema={settingsSchema}
+									values={settingValues}
+									loading={settingsLoading}
+									onSet={(settingPath, scope, value) => void setSettingValue(settingPath, scope, value)}
+									onReset={(settingPath, scope) => void resetSettingValue(settingPath, scope)}
+								/>
+							) : inspector === "resources" ? (
+								<ResourcesInspector
+									resources={resources}
+									loading={resourcesLoading}
+									onReload={() => void reloadResources()}
+								/>
 							) : inspector === "diagnostics" ? (
 								<dl className="space-y-3 p-4">
 									<div>
@@ -973,6 +1622,18 @@ export default function App() {
 					</aside>
 				) : null}
 			</section>
+
+			{modelPickerOpen ? (
+				<ModelPicker
+					models={availableModels ?? []}
+					loading={modelsLoading}
+					current={session?.model}
+					onSelect={model => void selectModel(model)}
+					onClose={() => setModelPickerOpen(false)}
+				/>
+			) : null}
+
+			{paletteOpen ? <CommandPalette actions={paletteActions} onClose={() => setPaletteOpen(false)} /> : null}
 
 			{interaction ? (
 				<HostInteraction
