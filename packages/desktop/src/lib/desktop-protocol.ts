@@ -55,7 +55,25 @@ export type DesktopRpcCommand =
 	| { type: "set_setting_value"; path: string; scope: "project" | "global"; value: unknown }
 	| { type: "clear_setting_value"; path: string; scope: "project" | "global" }
 	| { type: "get_resources" }
-	| { type: "reload_resources" };
+	| { type: "reload_resources" }
+	| { type: "get_subagents" }
+	| { type: "set_subagent_subscription"; level: "off" | "progress" | "events" }
+	| { type: "get_workflow_state" }
+	| { type: "enter_plan_mode"; workflow?: "parallel" | "iterative" }
+	| { type: "exit_plan_mode" }
+	| { type: "goal_set"; objective: string; tokenBudget?: number }
+	| { type: "goal_pause" }
+	| { type: "goal_resume" }
+	| { type: "goal_drop" }
+	| { type: "goal_set_budget"; tokenBudget?: number }
+	| { type: "get_update_status" }
+	| { type: "get_session_stats" }
+	| { type: "handoff"; customInstructions?: string }
+	| { type: "collab_start"; relayUrl?: string; webUrl?: string }
+	| { type: "collab_stop" }
+	| { type: "get_collab_state" }
+	| { type: "collab_join"; link: string }
+	| { type: "collab_leave" };
 
 export interface DesktopRpcSuccess {
 	id?: string;
@@ -674,6 +692,330 @@ export function readResourcesSnapshot(value: unknown): DesktopResourcesSnapshot 
 	};
 }
 
+export type DesktopGoalStatus = "active" | "paused" | "budget-limited" | "complete" | "dropped";
+
+export interface DesktopGoal {
+	id: string;
+	objective: string;
+	status: DesktopGoalStatus;
+	tokenBudget?: number;
+	tokensUsed: number;
+	timeUsedSeconds: number;
+	createdAt: number;
+	updatedAt: number;
+}
+
+export interface DesktopGoalModeState {
+	enabled: boolean;
+	mode: "active" | "exiting";
+	goal: DesktopGoal;
+}
+
+export interface DesktopPlanModeState {
+	enabled: boolean;
+	planFilePath: string;
+	workflow?: "parallel" | "iterative";
+}
+
+export type DesktopAdvisorRuntimeStatus = "running" | "paused" | "quota_exhausted" | "error" | "no_model";
+
+export interface DesktopAdvisorOverview {
+	configured: boolean;
+	advisors: Array<{ name: string; status: DesktopAdvisorRuntimeStatus }>;
+}
+
+export interface DesktopWorkflowState {
+	planSettingEnabled: boolean;
+	goalSettingEnabled: boolean;
+	plan?: DesktopPlanModeState;
+	goal?: DesktopGoalModeState;
+	advisor: DesktopAdvisorOverview;
+}
+
+const GOAL_STATUSES: readonly DesktopGoalStatus[] = ["active", "paused", "budget-limited", "complete", "dropped"];
+const ADVISOR_STATUSES: readonly DesktopAdvisorRuntimeStatus[] = [
+	"running",
+	"paused",
+	"quota_exhausted",
+	"error",
+	"no_model",
+];
+
+function readGoal(value: unknown): DesktopGoal | undefined {
+	if (
+		!isRecord(value) ||
+		typeof value.id !== "string" ||
+		typeof value.objective !== "string" ||
+		typeof value.tokensUsed !== "number" ||
+		typeof value.timeUsedSeconds !== "number" ||
+		typeof value.createdAt !== "number" ||
+		typeof value.updatedAt !== "number"
+	) {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		objective: value.objective,
+		status: GOAL_STATUSES.includes(value.status as DesktopGoalStatus)
+			? (value.status as DesktopGoalStatus)
+			: "active",
+		tokenBudget: typeof value.tokenBudget === "number" ? value.tokenBudget : undefined,
+		tokensUsed: value.tokensUsed,
+		timeUsedSeconds: value.timeUsedSeconds,
+		createdAt: value.createdAt,
+		updatedAt: value.updatedAt,
+	};
+}
+
+function readGoalModeState(value: unknown): DesktopGoalModeState | undefined {
+	if (!isRecord(value) || typeof value.enabled !== "boolean") return undefined;
+	const goal = readGoal(value.goal);
+	if (!goal) return undefined;
+	return { enabled: value.enabled, mode: value.mode === "exiting" ? "exiting" : "active", goal };
+}
+
+function readPlanModeState(value: unknown): DesktopPlanModeState | undefined {
+	if (!isRecord(value) || typeof value.enabled !== "boolean" || typeof value.planFilePath !== "string") {
+		return undefined;
+	}
+	return {
+		enabled: value.enabled,
+		planFilePath: value.planFilePath,
+		workflow: value.workflow === "iterative" ? "iterative" : value.workflow === "parallel" ? "parallel" : undefined,
+	};
+}
+
+function readAdvisorOverview(value: unknown): DesktopAdvisorOverview {
+	if (!isRecord(value)) return { configured: false, advisors: [] };
+	const advisors = Array.isArray(value.advisors)
+		? value.advisors
+				.filter(
+					(entry): entry is Record<string, unknown> =>
+						isRecord(entry) &&
+						typeof entry.name === "string" &&
+						ADVISOR_STATUSES.includes(entry.status as DesktopAdvisorRuntimeStatus),
+				)
+				.map(entry => ({ name: entry.name as string, status: entry.status as DesktopAdvisorRuntimeStatus }))
+		: [];
+	return { configured: value.configured === true, advisors };
+}
+
+export function readWorkflowState(value: unknown): DesktopWorkflowState {
+	if (!isRecord(value)) throw new Error("Sidecar returned an invalid workflow state");
+	return {
+		planSettingEnabled: value.planSettingEnabled === true,
+		goalSettingEnabled: value.goalSettingEnabled === true,
+		plan: readPlanModeState(value.plan),
+		goal: readGoalModeState(value.goal),
+		advisor: readAdvisorOverview(value.advisor),
+	};
+}
+
+export type DesktopSubagentStatus = "pending" | "running" | "completed" | "failed" | "aborted";
+
+export interface DesktopSubagentProgress {
+	currentTool?: string;
+	lastIntent?: string;
+	toolCount: number;
+	tokens: number;
+	cost: number;
+	durationMs: number;
+	contextTokens?: number;
+	contextWindow?: number;
+	retrying: boolean;
+}
+
+export interface DesktopSubagentSnapshot {
+	id: string;
+	index: number;
+	agent: string;
+	description?: string;
+	status: DesktopSubagentStatus;
+	task?: string;
+	assignment?: string;
+	lastUpdate: number;
+	progress?: DesktopSubagentProgress;
+}
+
+const SUBAGENT_STATUSES: readonly DesktopSubagentStatus[] = ["pending", "running", "completed", "failed", "aborted"];
+
+function readSubagentProgress(value: unknown): DesktopSubagentProgress | undefined {
+	if (!isRecord(value)) return undefined;
+	return {
+		currentTool: typeof value.currentTool === "string" ? value.currentTool : undefined,
+		lastIntent: typeof value.lastIntent === "string" ? value.lastIntent : undefined,
+		toolCount: typeof value.toolCount === "number" ? value.toolCount : 0,
+		tokens: typeof value.tokens === "number" ? value.tokens : 0,
+		cost: typeof value.cost === "number" ? value.cost : 0,
+		durationMs: typeof value.durationMs === "number" ? value.durationMs : 0,
+		contextTokens: typeof value.contextTokens === "number" ? value.contextTokens : undefined,
+		contextWindow: typeof value.contextWindow === "number" ? value.contextWindow : undefined,
+		retrying: isRecord(value.retryState),
+	};
+}
+
+function readSubagentSnapshot(value: unknown): DesktopSubagentSnapshot | undefined {
+	if (
+		!isRecord(value) ||
+		typeof value.id !== "string" ||
+		typeof value.index !== "number" ||
+		typeof value.agent !== "string" ||
+		typeof value.lastUpdate !== "number"
+	) {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		index: value.index,
+		agent: value.agent,
+		description: typeof value.description === "string" ? value.description : undefined,
+		status: SUBAGENT_STATUSES.includes(value.status as DesktopSubagentStatus)
+			? (value.status as DesktopSubagentStatus)
+			: "running",
+		task: typeof value.task === "string" ? value.task : undefined,
+		assignment: typeof value.assignment === "string" ? value.assignment : undefined,
+		lastUpdate: value.lastUpdate,
+		progress: readSubagentProgress(value.progress),
+	};
+}
+
+export function readSubagents(value: unknown): DesktopSubagentSnapshot[] {
+	if (!isRecord(value) || !Array.isArray(value.subagents)) throw new Error("Sidecar returned invalid subagents");
+	return value.subagents
+		.map(readSubagentSnapshot)
+		.filter((entry): entry is DesktopSubagentSnapshot => entry !== undefined);
+}
+
+export interface DesktopUpdateStatus {
+	currentVersion: string;
+	latestVersion?: string;
+	updateAvailable: boolean;
+	downloadUrl: string;
+	checkedAt: number;
+	error?: string;
+}
+
+export function readUpdateStatus(value: unknown): DesktopUpdateStatus {
+	if (
+		!isRecord(value) ||
+		typeof value.currentVersion !== "string" ||
+		typeof value.downloadUrl !== "string" ||
+		typeof value.checkedAt !== "number"
+	) {
+		throw new Error("Sidecar returned an invalid update status");
+	}
+	return {
+		currentVersion: value.currentVersion,
+		latestVersion: typeof value.latestVersion === "string" ? value.latestVersion : undefined,
+		updateAvailable: value.updateAvailable === true,
+		downloadUrl: value.downloadUrl,
+		checkedAt: value.checkedAt,
+		error: typeof value.error === "string" ? value.error : undefined,
+	};
+}
+
+export interface DesktopSessionStats {
+	userMessages: number;
+	assistantMessages: number;
+	toolCalls: number;
+	totalMessages: number;
+	tokens: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number; total: number };
+	cost: number;
+}
+
+export function readSessionStats(value: unknown): DesktopSessionStats {
+	if (!isRecord(value) || !isRecord(value.tokens)) throw new Error("Sidecar returned invalid session stats");
+	const tokens = value.tokens;
+	const num = (v: unknown): number => (typeof v === "number" ? v : 0);
+	return {
+		userMessages: num(value.userMessages),
+		assistantMessages: num(value.assistantMessages),
+		toolCalls: num(value.toolCalls),
+		totalMessages: num(value.totalMessages),
+		tokens: {
+			input: num(tokens.input),
+			output: num(tokens.output),
+			reasoning: num(tokens.reasoning),
+			cacheRead: num(tokens.cacheRead),
+			cacheWrite: num(tokens.cacheWrite),
+			total: num(tokens.total),
+		},
+		cost: num(value.cost),
+	};
+}
+
+export interface DesktopCollabParticipant {
+	name: string;
+	role: "host" | "guest";
+	readOnly?: boolean;
+}
+
+export interface DesktopCollabState {
+	hosting: boolean;
+	link?: string;
+	webLink?: string;
+	viewLink?: string;
+	webViewLink?: string;
+	participants: DesktopCollabParticipant[];
+}
+
+function readCollabParticipant(value: unknown): DesktopCollabParticipant | undefined {
+	if (!isRecord(value) || typeof value.name !== "string") return undefined;
+	return {
+		name: value.name,
+		role: value.role === "host" ? "host" : "guest",
+		readOnly: value.readOnly === true ? true : undefined,
+	};
+}
+
+export function readCollabState(value: unknown): DesktopCollabState {
+	if (!isRecord(value)) throw new Error("Sidecar returned an invalid collab state");
+	return {
+		hosting: value.hosting === true,
+		link: typeof value.link === "string" ? value.link : undefined,
+		webLink: typeof value.webLink === "string" ? value.webLink : undefined,
+		viewLink: typeof value.viewLink === "string" ? value.viewLink : undefined,
+		webViewLink: typeof value.webViewLink === "string" ? value.webViewLink : undefined,
+		participants: Array.isArray(value.participants)
+			? value.participants.map(readCollabParticipant).filter((entry): entry is DesktopCollabParticipant => !!entry)
+			: [],
+	};
+}
+
+export interface DesktopCollabGuestHostState {
+	sessionName?: string;
+	cwd: string;
+	isStreaming: boolean;
+	participants: DesktopCollabParticipant[];
+}
+
+export interface DesktopCollabGuestState {
+	joined: boolean;
+	readOnly: boolean;
+	state: DesktopCollabGuestHostState | null;
+}
+
+function readCollabGuestHostState(value: unknown): DesktopCollabGuestHostState | null {
+	if (!isRecord(value) || typeof value.cwd !== "string") return null;
+	return {
+		sessionName: typeof value.sessionName === "string" ? value.sessionName : undefined,
+		cwd: value.cwd,
+		isStreaming: value.isStreaming === true,
+		participants: Array.isArray(value.participants)
+			? value.participants.map(readCollabParticipant).filter((entry): entry is DesktopCollabParticipant => !!entry)
+			: [],
+	};
+}
+
+export function readCollabGuestState(value: unknown): DesktopCollabGuestState {
+	if (!isRecord(value)) throw new Error("Sidecar returned an invalid collab guest state");
+	return {
+		joined: value.joined === true,
+		readOnly: value.readOnly === true,
+		state: readCollabGuestHostState(value.state),
+	};
+}
+
 export interface DesktopSlashCommand {
 	name: string;
 	description?: string;
@@ -996,4 +1338,22 @@ export function readWorkspaceReview(value: unknown): DesktopWorkspaceReview {
 
 export function isHostInteraction(value: DesktopRpcFrame): value is DesktopHostInteraction {
 	return value.type === "extension_ui_request" && "method" in value && typeof value.method === "string";
+}
+
+export function isSubagentFrame(value: DesktopRpcFrame): boolean {
+	return value.type === "subagent_lifecycle" || value.type === "subagent_progress" || value.type === "subagent_event";
+}
+
+export interface DesktopGoalUpdatedFrame {
+	goal: DesktopGoal | null;
+	state?: DesktopGoalModeState;
+}
+
+/** Call only after checking `frame.type === "goal_updated"`. */
+export function readGoalUpdatedFrame(value: DesktopRpcFrame): DesktopGoalUpdatedFrame {
+	const record = value as unknown as Record<string, unknown>;
+	return {
+		goal: readGoal(record.goal) ?? null,
+		state: readGoalModeState(record.state),
+	};
 }

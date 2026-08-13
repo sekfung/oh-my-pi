@@ -130,7 +130,8 @@ export interface ApplicationChangedEvent {
 	type: "application_changed";
 	sequence: number;
 	revision: number;
-	reason: "runtime" | "intent";
+	/** "external" covers changes the runtime made outside the intent path (e.g. a collab guest join/leave swapping the active session). */
+	reason: "runtime" | "intent" | "external";
 }
 
 /** One changed path in the working tree, with bounded diff text. */

@@ -2,18 +2,26 @@ import { describe, expect, test } from "bun:test";
 import {
 	isBashOutput,
 	isHostInteraction,
+	isSubagentFrame,
 	readApplicationSnapshot,
 	readApprovalPolicies,
 	readAsyncJobs,
 	readAvailableModels,
 	readBashResult,
+	readCollabGuestState,
+	readCollabState,
 	readContextState,
+	readGoalUpdatedFrame,
 	readMessages,
 	readResourcesSnapshot,
 	readSessionState,
+	readSessionStats,
 	readSettingsSchema,
 	readSettingValues,
 	readSlashCommands,
+	readSubagents,
+	readUpdateStatus,
+	readWorkflowState,
 	readWorkspaceReview,
 } from "../src/lib/desktop-protocol";
 
@@ -437,5 +445,259 @@ describe("desktop protocol validation", () => {
 			agents: [],
 			tools: [],
 		});
+	});
+
+	test("projects workflow state (plan/goal/advisor), dropping an invalid goal", () => {
+		const state = readWorkflowState({
+			planSettingEnabled: true,
+			goalSettingEnabled: true,
+			plan: { enabled: true, planFilePath: "local://PLAN.md", workflow: "parallel" },
+			goal: {
+				enabled: true,
+				mode: "active",
+				goal: {
+					id: "goal-1",
+					objective: "Ship the feature",
+					status: "active",
+					tokenBudget: 50000,
+					tokensUsed: 1200,
+					timeUsedSeconds: 30,
+					createdAt: 1000,
+					updatedAt: 2000,
+				},
+			},
+			advisor: { configured: true, advisors: [{ name: "reviewer", status: "running" }] },
+		});
+		expect(state).toEqual({
+			planSettingEnabled: true,
+			goalSettingEnabled: true,
+			plan: { enabled: true, planFilePath: "local://PLAN.md", workflow: "parallel" },
+			goal: {
+				enabled: true,
+				mode: "active",
+				goal: {
+					id: "goal-1",
+					objective: "Ship the feature",
+					status: "active",
+					tokenBudget: 50000,
+					tokensUsed: 1200,
+					timeUsedSeconds: 30,
+					createdAt: 1000,
+					updatedAt: 2000,
+				},
+			},
+			advisor: { configured: true, advisors: [{ name: "reviewer", status: "running" }] },
+		});
+		expect(() => readWorkflowState(null)).toThrow("invalid workflow state");
+		// A goal object missing required fields drops the whole `goal` state instead of throwing.
+		expect(readWorkflowState({ goal: { enabled: true, mode: "active", goal: { id: "g" } } }).goal).toBeUndefined();
+		expect(readWorkflowState({}).advisor).toEqual({ configured: false, advisors: [] });
+	});
+
+	test("projects subagent snapshots, filtering malformed entries and defaulting unknown status", () => {
+		const subagents = readSubagents({
+			subagents: [
+				{
+					id: "sub-1",
+					index: 0,
+					agent: "explorer",
+					description: "Find callers",
+					status: "running",
+					task: "grep for callers",
+					lastUpdate: 1700,
+					progress: {
+						currentTool: "grep",
+						toolCount: 3,
+						tokens: 1500,
+						cost: 0.02,
+						durationMs: 4000,
+						retryState: { attempt: 1 },
+					},
+				},
+				{ id: "sub-2", index: 1, agent: "bad-status", status: "not-a-real-status", lastUpdate: 1701 },
+				{ notAnId: true },
+			],
+		});
+		expect(subagents).toEqual([
+			{
+				id: "sub-1",
+				index: 0,
+				agent: "explorer",
+				description: "Find callers",
+				status: "running",
+				task: "grep for callers",
+				assignment: undefined,
+				lastUpdate: 1700,
+				progress: {
+					currentTool: "grep",
+					lastIntent: undefined,
+					toolCount: 3,
+					tokens: 1500,
+					cost: 0.02,
+					durationMs: 4000,
+					contextTokens: undefined,
+					contextWindow: undefined,
+					retrying: true,
+				},
+			},
+			{
+				id: "sub-2",
+				index: 1,
+				agent: "bad-status",
+				description: undefined,
+				status: "running",
+				task: undefined,
+				assignment: undefined,
+				lastUpdate: 1701,
+				progress: undefined,
+			},
+		]);
+		expect(() => readSubagents(null)).toThrow("invalid subagents");
+	});
+
+	test("recognizes subagent push frames and leaves other frame types alone", () => {
+		expect(isSubagentFrame({ type: "subagent_lifecycle" })).toBe(true);
+		expect(isSubagentFrame({ type: "subagent_progress" })).toBe(true);
+		expect(isSubagentFrame({ type: "subagent_event" })).toBe(true);
+		expect(isSubagentFrame({ type: "message_start" })).toBe(false);
+	});
+
+	test("projects update status, tolerating a failed check", () => {
+		const available = readUpdateStatus({
+			currentVersion: "17.2.15",
+			latestVersion: "17.3.0",
+			updateAvailable: true,
+			downloadUrl: "https://omp.sh",
+			checkedAt: 1000,
+		});
+		expect(available).toEqual({
+			currentVersion: "17.2.15",
+			latestVersion: "17.3.0",
+			updateAvailable: true,
+			downloadUrl: "https://omp.sh",
+			checkedAt: 1000,
+			error: undefined,
+		});
+		const failed = readUpdateStatus({
+			currentVersion: "17.2.15",
+			updateAvailable: false,
+			downloadUrl: "https://omp.sh",
+			checkedAt: 1000,
+			error: "registry unreachable",
+		});
+		expect(failed.updateAvailable).toBe(false);
+		expect(failed.latestVersion).toBeUndefined();
+		expect(failed.error).toBe("registry unreachable");
+		expect(() => readUpdateStatus(null)).toThrow("invalid update status");
+	});
+
+	test("projects session stats, defaulting missing numeric fields to zero", () => {
+		const stats = readSessionStats({
+			userMessages: 5,
+			assistantMessages: 5,
+			toolCalls: 12,
+			totalMessages: 22,
+			tokens: { input: 1000, output: 500, reasoning: 100, cacheRead: 800, cacheWrite: 200, total: 2600 },
+			cost: 0.15,
+		});
+		expect(stats).toEqual({
+			userMessages: 5,
+			assistantMessages: 5,
+			toolCalls: 12,
+			totalMessages: 22,
+			tokens: { input: 1000, output: 500, reasoning: 100, cacheRead: 800, cacheWrite: 200, total: 2600 },
+			cost: 0.15,
+		});
+		expect(readSessionStats({ tokens: {} })).toEqual({
+			userMessages: 0,
+			assistantMessages: 0,
+			toolCalls: 0,
+			totalMessages: 0,
+			tokens: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			cost: 0,
+		});
+		expect(() => readSessionStats(null)).toThrow("invalid session stats");
+		expect(() => readSessionStats({})).toThrow("invalid session stats");
+	});
+
+	test("projects collab host state and drops malformed participants", () => {
+		const hosting = readCollabState({
+			hosting: true,
+			link: "relay.example.com/r/room.key",
+			webLink: "https://relay.example.com/#room.key",
+			viewLink: "relay.example.com/r/room.viewkey",
+			webViewLink: "https://relay.example.com/#room.viewkey",
+			participants: [
+				{ name: "sekfung", role: "host" },
+				{ name: "guest-1", role: "guest", readOnly: true },
+				{ notName: true },
+			],
+		});
+		expect(hosting).toEqual({
+			hosting: true,
+			link: "relay.example.com/r/room.key",
+			webLink: "https://relay.example.com/#room.key",
+			viewLink: "relay.example.com/r/room.viewkey",
+			webViewLink: "https://relay.example.com/#room.viewkey",
+			participants: [
+				{ name: "sekfung", role: "host", readOnly: undefined },
+				{ name: "guest-1", role: "guest", readOnly: true },
+			],
+		});
+		expect(readCollabState({})).toEqual({
+			hosting: false,
+			link: undefined,
+			webLink: undefined,
+			viewLink: undefined,
+			webViewLink: undefined,
+			participants: [],
+		});
+		expect(() => readCollabState(null)).toThrow("invalid collab state");
+	});
+
+	test("projects collab guest state, treating a malformed host state as not-yet-synced", () => {
+		const joined = readCollabGuestState({
+			joined: true,
+			readOnly: false,
+			state: { sessionName: "Debugging together", cwd: "/workspace/project", isStreaming: true, participants: [] },
+		});
+		expect(joined).toEqual({
+			joined: true,
+			readOnly: false,
+			state: { sessionName: "Debugging together", cwd: "/workspace/project", isStreaming: true, participants: [] },
+		});
+		expect(readCollabGuestState({ joined: true, state: {} })).toEqual({ joined: true, readOnly: false, state: null });
+		expect(readCollabGuestState({})).toEqual({ joined: false, readOnly: false, state: null });
+		expect(() => readCollabGuestState(null)).toThrow("invalid collab guest state");
+	});
+
+	test("reads a goal_updated push frame's goal and state", () => {
+		const frame = readGoalUpdatedFrame({
+			type: "goal_updated",
+			goal: {
+				id: "goal-1",
+				objective: "Ship the feature",
+				status: "complete",
+				tokensUsed: 4000,
+				timeUsedSeconds: 90,
+				createdAt: 1000,
+				updatedAt: 5000,
+			},
+			state: undefined,
+		});
+		expect(frame.goal).toEqual({
+			id: "goal-1",
+			objective: "Ship the feature",
+			status: "complete",
+			tokenBudget: undefined,
+			tokensUsed: 4000,
+			timeUsedSeconds: 90,
+			createdAt: 1000,
+			updatedAt: 5000,
+		});
+		expect(frame.state).toBeUndefined();
+
+		const dropped = readGoalUpdatedFrame({ type: "goal_updated", goal: null });
+		expect(dropped.goal).toBeNull();
 	});
 });

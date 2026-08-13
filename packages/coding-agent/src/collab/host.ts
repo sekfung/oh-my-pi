@@ -21,13 +21,15 @@ import type {
 	AgentEvent as WireAgentEvent,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
-import type { InteractiveModeContext } from "../modes/types";
+import type { Settings } from "../config/settings";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
-import type { AgentSessionEvent } from "../session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
+import type { SessionManager } from "../session/session-manager";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
+import type { EventBus } from "../utils/event-bus";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
 import {
@@ -119,8 +121,46 @@ const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+/**
+ * Everything {@link CollabHost} needs from its host environment. Narrower than
+ * `InteractiveModeContext` on purpose: `InteractiveModeContext` already
+ * satisfies this structurally (no TUI-side changes needed), and RPC mode can
+ * build a small literal object implementing it — the same pattern
+ * `GoalRuntimeHost` uses for goal mode (see `../goals/runtime.ts`).
+ */
+export interface CollabHostContext {
+	sessionManager: Pick<SessionManager, "getSessionId" | "getCwd" | "snapshotForReplication" | "onEntryAppended">;
+	session: Pick<
+		AgentSession,
+		| "subscribe"
+		| "emitNotice"
+		| "isStreaming"
+		| "isAborting"
+		| "queuedMessageCount"
+		| "sessionName"
+		| "model"
+		| "thinkingLevel"
+		| "promptCustomMessage"
+		| "abort"
+	>;
+	settings: Pick<Settings, "get">;
+	eventBus?: EventBus;
+	/** Cleared by {@link CollabHost}'s own teardown — mirrors `InteractiveModeContext.collabHost`. */
+	collabHost?: CollabHost;
+	/** TUI status/redraw hooks. No-ops are fine for headless hosts. */
+	showStatus(message: string, options?: { dim?: boolean }): void;
+	updatePendingMessagesDisplay(): void;
+	statusLine: {
+		setCollabStatus(status: { role: "host"; participantCount: number } | null): void;
+		invalidate(): void;
+		/** Same shape the TUI status line memoizes; an RPC host can compute this from `session.getContextUsage()`. */
+		getCachedContextBreakdown(): { usedTokens: number; contextWindow: number };
+	};
+	ui: { requestRender(): void };
+}
+
 export class CollabHost {
-	#ctx: InteractiveModeContext;
+	#ctx: CollabHostContext;
 	#socket: CollabSocket | null = null;
 	#link = "";
 	#webLink = "";
@@ -140,7 +180,7 @@ export class CollabHost {
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
 
-	constructor(ctx: InteractiveModeContext) {
+	constructor(ctx: CollabHostContext) {
 		this.#ctx = ctx;
 	}
 

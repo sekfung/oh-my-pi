@@ -5,6 +5,7 @@ import {
 	Blocks,
 	Check,
 	ChevronDown,
+	Compass,
 	CopyPlus,
 	Cpu,
 	Download,
@@ -23,6 +24,7 @@ import {
 	PanelRight,
 	Pencil,
 	Plus,
+	Radio,
 	RotateCcw,
 	Send,
 	Settings2,
@@ -39,6 +41,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import appIcon from "@/assets/app-icon-ui.png";
 import { ApprovalsInspector } from "@/components/approvals-inspector";
+import { CollabInspector } from "@/components/collab-inspector";
 import { CommandPalette, type PaletteAction } from "@/components/command-palette";
 import { ComposerSuggestions } from "@/components/composer-suggestions";
 import { ContextInspector } from "@/components/context-inspector";
@@ -50,6 +53,7 @@ import { SettingsInspector } from "@/components/settings-inspector";
 import { ThinkingMenu } from "@/components/thinking-menu";
 import { Transcript } from "@/components/transcript";
 import { Button } from "@/components/ui/button";
+import { WorkflowsInspector } from "@/components/workflows-inspector";
 import { ChangesInspector, FilesInspector } from "@/components/workspace-review";
 import {
 	type DesktopApplicationIntent,
@@ -57,29 +61,43 @@ import {
 	type DesktopApprovalPolicies,
 	type DesktopAsyncJob,
 	type DesktopAvailableModel,
+	type DesktopCollabGuestState,
+	type DesktopCollabState,
 	type DesktopContextState,
 	type DesktopHostInteraction,
 	type DesktopImageContent,
 	type DesktopQueuedMessage,
 	type DesktopResourcesSnapshot,
 	type DesktopSessionState,
+	type DesktopSessionStats,
 	type DesktopSettingsSchema,
 	type DesktopSettingValueEntry,
 	type DesktopSlashCommand,
+	type DesktopSubagentSnapshot,
+	type DesktopUpdateStatus,
+	type DesktopWorkflowState,
 	type DesktopWorkspaceReview,
 	isBashOutput,
 	isHostInteraction,
+	isSubagentFrame,
 	readApplicationIntentResult,
 	readApplicationSnapshot,
 	readApprovalPolicies,
 	readAsyncJobs,
 	readAvailableModels,
+	readCollabGuestState,
+	readCollabState,
 	readContextState,
+	readGoalUpdatedFrame,
 	readMessages,
 	readResourcesSnapshot,
+	readSessionStats,
 	readSettingsSchema,
 	readSettingValues,
 	readSlashCommands,
+	readSubagents,
+	readUpdateStatus,
+	readWorkflowState,
 	readWorkspaceReview,
 } from "@/lib/desktop-protocol";
 import type { DesktopRpcCommand } from "@/lib/desktop-transport";
@@ -88,9 +106,23 @@ import { cn } from "@/lib/utils";
 
 const RECENT_PROJECTS_KEY = "omp.desktop.recent-projects";
 const APPEARANCE_KEY = "omp.desktop.appearance";
+const ZOOM_KEY = "omp.desktop.zoom";
+const ZOOM_MIN = 0.8;
+const ZOOM_MAX = 1.6;
+const ZOOM_STEP = 0.1;
 
 type ConnectionStatus = "empty" | "connecting" | "connected" | "recovering" | "disconnected";
-type Inspector = "tree" | "files" | "changes" | "approvals" | "context" | "settings" | "resources" | "diagnostics";
+type Inspector =
+	| "tree"
+	| "files"
+	| "changes"
+	| "approvals"
+	| "context"
+	| "workflows"
+	| "collab"
+	| "settings"
+	| "resources"
+	| "diagnostics";
 
 interface ShellRunState {
 	id: string;
@@ -157,6 +189,19 @@ export default function App() {
 	const [contextState, setContextState] = useState<DesktopContextState>();
 	const [asyncJobs, setAsyncJobs] = useState<DesktopAsyncJob[]>();
 	const [contextLoading, setContextLoading] = useState(false);
+	const [workflowState, setWorkflowState] = useState<DesktopWorkflowState>();
+	const [subagents, setSubagents] = useState<DesktopSubagentSnapshot[]>();
+	const [workflowsLoading, setWorkflowsLoading] = useState(false);
+	const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus>();
+	const [updateBannerDismissed, setUpdateBannerDismissed] = useState(false);
+	const [sessionStats, setSessionStats] = useState<DesktopSessionStats>();
+	const [sessionStatsLoading, setSessionStatsLoading] = useState(false);
+	const [sessionSearch, setSessionSearch] = useState("");
+	const [collabState, setCollabState] = useState<DesktopCollabState>();
+	const [collabGuestState, setCollabGuestState] = useState<DesktopCollabGuestState>();
+	const [collabLoading, setCollabLoading] = useState(false);
+	const [collabRelayUrl, setCollabRelayUrl] = useState("");
+	const [collabJoinLink, setCollabJoinLink] = useState("");
 	const [settingsSchema, setSettingsSchema] = useState<DesktopSettingsSchema>();
 	const [settingValues, setSettingValues] = useState<DesktopSettingValueEntry[]>();
 	const [settingsLoading, setSettingsLoading] = useState(false);
@@ -180,6 +225,11 @@ export default function App() {
 	const [paletteOpen, setPaletteOpen] = useState(false);
 	const [thinkingMenuOpen, setThinkingMenuOpen] = useState(false);
 	const [interaction, setInteraction] = useState<DesktopHostInteraction>();
+	const [extensionStatuses, setExtensionStatuses] = useState<Record<string, string>>({});
+	const [extensionWidgets, setExtensionWidgets] = useState<
+		Record<string, { lines: string[]; placement: "aboveEditor" | "belowEditor" }>
+	>({});
+	const [extensionTitle, setExtensionTitle] = useState<string>();
 	const [error, setError] = useState<string>();
 	const [notice, setNotice] = useState<string>();
 	const [inspector, setInspector] = useState<Inspector>();
@@ -192,9 +242,20 @@ export default function App() {
 	});
 	const [systemDark, setSystemDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
 	const dark = appearance === "dark" || (appearance === "system" && systemDark);
+	const [zoom, setZoom] = useState(() => {
+		const saved = Number.parseFloat(localStorage.getItem(ZOOM_KEY) ?? "");
+		return Number.isFinite(saved) && saved >= ZOOM_MIN && saved <= ZOOM_MAX ? saved : 1;
+	});
 	const currentModelEntry = availableModels?.find(
 		model => model.provider === session?.model?.provider && model.id === session?.model?.id,
 	);
+
+	const filteredSessions = useMemo(() => {
+		const sessions = application?.sessions ?? [];
+		const query = sessionSearch.trim().toLowerCase();
+		if (!query) return sessions;
+		return sessions.filter(item => `${item.title ?? ""} ${item.firstMessage}`.toLowerCase().includes(query));
+	}, [application, sessionSearch]);
 
 	const refresh = useCallback(async () => {
 		const [applicationResponse, messagesResponse] = await Promise.all([
@@ -260,6 +321,132 @@ export default function App() {
 			setContextLoading(false);
 		}
 	}, [transport]);
+
+	const refreshSubagents = useCallback(async () => {
+		try {
+			const response = await transport.request({ type: "get_subagents" });
+			if (!response.success) throw new Error(response.error);
+			if (response.command !== "get_subagents") throw new Error("Unexpected subagents response");
+			setSubagents(readSubagents(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	}, [transport]);
+
+	const refreshWorkflows = useCallback(async () => {
+		setWorkflowsLoading(true);
+		try {
+			const [stateResponse] = await Promise.all([
+				transport.request({ type: "get_workflow_state" }),
+				refreshSubagents(),
+			]);
+			if (!stateResponse.success) throw new Error(stateResponse.error);
+			if (stateResponse.command !== "get_workflow_state") throw new Error("Unexpected workflow state response");
+			setWorkflowState(readWorkflowState(stateResponse.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setWorkflowsLoading(false);
+		}
+	}, [transport, refreshSubagents]);
+
+	const runWorkflowCommand = async (command: DesktopRpcCommand) => {
+		try {
+			const response = await transport.request(command);
+			if (!response.success) throw new Error(response.error);
+			if ("data" in response && response.data) setWorkflowState(readWorkflowState(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const refreshSessionStats = useCallback(async () => {
+		setSessionStatsLoading(true);
+		try {
+			const response = await transport.request({ type: "get_session_stats" });
+			if (!response.success) throw new Error(response.error);
+			if (response.command !== "get_session_stats") throw new Error("Unexpected session stats response");
+			setSessionStats(readSessionStats(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setSessionStatsLoading(false);
+		}
+	}, [transport]);
+
+	const refreshCollabState = useCallback(async () => {
+		setCollabLoading(true);
+		try {
+			const response = await transport.request({ type: "get_collab_state" });
+			if (!response.success) throw new Error(response.error);
+			if (response.command !== "get_collab_state") throw new Error("Unexpected collab state response");
+			setCollabState(readCollabState(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setCollabLoading(false);
+		}
+	}, [transport]);
+
+	const startCollab = async () => {
+		try {
+			const response = await transport.request({
+				type: "collab_start",
+				relayUrl: collabRelayUrl.trim() || undefined,
+			});
+			if (!response.success) throw new Error(response.error);
+			if (response.command === "collab_start") setCollabState(readCollabState(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const stopCollab = async () => {
+		try {
+			const response = await transport.request({ type: "collab_stop" });
+			if (!response.success) throw new Error(response.error);
+			if (response.command === "collab_stop") setCollabState(readCollabState(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const joinCollab = async () => {
+		const link = collabJoinLink.trim();
+		if (!link) return;
+		try {
+			const response = await transport.request({ type: "collab_join", link });
+			if (!response.success) throw new Error(response.error);
+			if (response.command === "collab_join") setCollabGuestState(readCollabGuestState(response.data));
+			setCollabJoinLink("");
+			await refresh();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const leaveCollab = async () => {
+		try {
+			const response = await transport.request({ type: "collab_leave" });
+			if (!response.success) throw new Error(response.error);
+			setCollabGuestState(undefined);
+			await refresh();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const handoffSession = async () => {
+		try {
+			const response = await transport.request({ type: "handoff" });
+			if (!response.success) throw new Error(response.error);
+			const data = response.command === "handoff" ? (response.data as { savedPath?: string } | null) : undefined;
+			setNotice(data?.savedPath ? `Session handed off. Saved to ${data.savedPath}` : "Session handed off.");
+			await refresh();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
 
 	const refreshSettings = useCallback(async () => {
 		setSettingsLoading(true);
@@ -353,17 +540,34 @@ export default function App() {
 		});
 	};
 
+	const checkForUpdates = useCallback(async () => {
+		try {
+			const response = await transport.request({ type: "get_update_status" });
+			if (!response.success) return;
+			if (response.command !== "get_update_status") return;
+			setUpdateStatus(readUpdateStatus(response.data));
+		} catch {
+			// Best-effort: an unreachable registry is not worth surfacing as an error.
+		}
+	}, [transport]);
+
 	const connect = useCallback(
 		async (path: string, recovering = false) => {
 			setStatus(recovering ? "recovering" : "connecting");
 			setError(undefined);
+			setExtensionStatuses({});
+			setExtensionWidgets({});
+			setExtensionTitle(undefined);
 			try {
 				await transport.open(path);
 				await refresh();
 				projectRef.current = path;
 				setProject(path);
 				setStatus("connected");
-				if (!recovering) restartedRef.current = false;
+				if (!recovering) {
+					restartedRef.current = false;
+					void checkForUpdates();
+				}
 				setRecentProjects(current => {
 					const next = [path, ...current.filter(candidate => candidate !== path)].slice(0, 12);
 					localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(next));
@@ -374,7 +578,7 @@ export default function App() {
 				setError(cause instanceof Error ? cause.message : String(cause));
 			}
 		},
-		[refresh, transport],
+		[refresh, transport, checkForUpdates],
 	);
 
 	useEffect(() => {
@@ -389,10 +593,35 @@ export default function App() {
 	}, []);
 
 	useEffect(() => {
+		document.documentElement.style.fontSize = zoom === 1 ? "" : `${zoom * 100}%`;
+	}, [zoom]);
+
+	useEffect(() => {
 		const onKeyDown = (event: KeyboardEvent) => {
 			if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
 				event.preventDefault();
 				setPaletteOpen(value => !value);
+				return;
+			}
+			if (!(event.metaKey || event.ctrlKey)) return;
+			if (event.key === "=" || event.key === "+") {
+				event.preventDefault();
+				setZoom(current => {
+					const next = Math.min(ZOOM_MAX, Math.round((current + ZOOM_STEP) * 100) / 100);
+					localStorage.setItem(ZOOM_KEY, String(next));
+					return next;
+				});
+			} else if (event.key === "-") {
+				event.preventDefault();
+				setZoom(current => {
+					const next = Math.max(ZOOM_MIN, Math.round((current - ZOOM_STEP) * 100) / 100);
+					localStorage.setItem(ZOOM_KEY, String(next));
+					return next;
+				});
+			} else if (event.key === "0") {
+				event.preventDefault();
+				setZoom(1);
+				localStorage.removeItem(ZOOM_KEY);
 			}
 		};
 		window.addEventListener("keydown", onKeyDown);
@@ -410,6 +639,23 @@ export default function App() {
 	useEffect(() => {
 		if (inspector === "context" && status === "connected") void refreshContext();
 	}, [inspector, status, refreshContext]);
+
+	useEffect(() => {
+		if (inspector === "diagnostics" && status === "connected") void refreshSessionStats();
+	}, [inspector, status, session?.sessionId, refreshSessionStats]);
+
+	useEffect(() => {
+		if (inspector === "collab" && status === "connected") void refreshCollabState();
+	}, [inspector, status, refreshCollabState]);
+
+	useEffect(() => {
+		if (inspector !== "workflows" || status !== "connected") return;
+		void refreshWorkflows();
+		void transport.request({ type: "set_subagent_subscription", level: "progress" });
+		return () => {
+			void transport.request({ type: "set_subagent_subscription", level: "off" });
+		};
+	}, [inspector, status, refreshWorkflows, transport]);
 
 	useEffect(() => {
 		if (inspector === "settings" && status === "connected") void refreshSettings();
@@ -440,6 +686,31 @@ export default function App() {
 					setNotice(frame.message);
 				} else if (frame.method === "open_url") {
 					openExternalUrl(frame.launchUrl ?? frame.url);
+				} else if (frame.method === "setStatus") {
+					setExtensionStatuses(current => {
+						if (frame.statusText === undefined) {
+							if (!(frame.statusKey in current)) return current;
+							const { [frame.statusKey]: _removed, ...rest } = current;
+							return rest;
+						}
+						return { ...current, [frame.statusKey]: frame.statusText };
+					});
+				} else if (frame.method === "setWidget") {
+					setExtensionWidgets(current => {
+						if (frame.widgetLines === undefined) {
+							if (!(frame.widgetKey in current)) return current;
+							const { [frame.widgetKey]: _removed, ...rest } = current;
+							return rest;
+						}
+						return {
+							...current,
+							[frame.widgetKey]: { lines: frame.widgetLines, placement: frame.widgetPlacement ?? "aboveEditor" },
+						};
+					});
+				} else if (frame.method === "setTitle") {
+					setExtensionTitle(frame.title);
+				} else if (frame.method === "set_editor_text") {
+					setDraft(frame.text);
 				} else if (
 					frame.method === "select" ||
 					frame.method === "toolApproval" ||
@@ -449,6 +720,10 @@ export default function App() {
 				) {
 					setInteraction(frame);
 				}
+				return;
+			}
+			if (isSubagentFrame(frame)) {
+				void refreshSubagents();
 				return;
 			}
 			if (
@@ -476,8 +751,20 @@ export default function App() {
 				setMessages(current => (current.length === 0 ? [frame.message] : [...current.slice(0, -1), frame.message]));
 			} else if (frame.type === "notice" && "message" in frame && typeof frame.message === "string") {
 				setNotice(frame.message);
+			} else if (frame.type === "command_output" && "text" in frame && typeof frame.text === "string") {
+				// Surfaces text-mode slash commands with no dedicated RPC/UI (e.g. /share, /dump).
+				setNotice(frame.text);
 			} else if (frame.type === "available_commands_update" && "commands" in frame) {
 				setSlashCommands(readSlashCommands(frame.commands));
+			} else if (frame.type === "goal_updated") {
+				const { state } = readGoalUpdatedFrame(frame);
+				setWorkflowState(current => (current ? { ...current, goal: state } : current));
+			} else if (frame.type === "collab_state_changed" && "data" in frame) {
+				setCollabState(readCollabState(frame.data));
+			} else if (frame.type === "collab_guest_state" && "data" in frame) {
+				const guestState = readCollabGuestState(frame.data);
+				setCollabGuestState(guestState);
+				if (!guestState.joined) void refresh();
 			} else if (
 				frame.type === "agent_end" ||
 				frame.type === "model_changed" ||
@@ -508,7 +795,7 @@ export default function App() {
 			stopExit();
 			void transport.dispose();
 		};
-	}, [connect, refresh, transport]);
+	}, [connect, refresh, refreshSubagents, transport]);
 
 	const chooseProject = async () => {
 		const selected = await open({ directory: true, multiple: false, title: "Open Oh My Pi project" });
@@ -843,6 +1130,20 @@ export default function App() {
 				run: () => setInspector("approvals"),
 			},
 			{
+				id: "op:workflows",
+				label: "Open Workflows",
+				icon: Compass,
+				group: "Operations",
+				run: () => setInspector("workflows"),
+			},
+			{
+				id: "op:collab",
+				label: collabState?.hosting ? "Open Collab (hosting)" : "Open Collab",
+				icon: Radio,
+				group: "Operations",
+				run: () => setInspector("collab"),
+			},
+			{
 				id: "op:diagnostics",
 				label: "Open Diagnostics",
 				icon: TerminalSquare,
@@ -857,6 +1158,14 @@ export default function App() {
 				group: "Operations",
 				run: cycleAppearance,
 			},
+			{
+				id: "op:check-updates",
+				label: "Check for updates",
+				hint: updateStatus ? `current ${updateStatus.currentVersion}` : undefined,
+				icon: Download,
+				group: "Operations",
+				run: () => void checkForUpdates(),
+			},
 		];
 		if (session?.isStreaming) {
 			operations.push({
@@ -868,7 +1177,7 @@ export default function App() {
 			});
 		}
 		return [...commandActions, ...operations];
-	}, [slashCommands, appearance, dark, session?.isStreaming]);
+	}, [slashCommands, appearance, dark, session?.isStreaming, updateStatus, checkForUpdates, collabState]);
 
 	if (!project && status !== "connecting") {
 		return (
@@ -937,6 +1246,7 @@ export default function App() {
 							variant="ghost"
 							className="size-6"
 							title="Import a Claude or Codex transcript"
+							aria-label="Import a Claude or Codex transcript"
 							onClick={() => setImportingSource(value => (value ? undefined : "claude"))}
 						>
 							<Upload />
@@ -946,6 +1256,7 @@ export default function App() {
 							variant="ghost"
 							className="size-6"
 							title="New session"
+							aria-label="New session"
 							onClick={() => runIntent({ type: "new_session" })}
 						>
 							<Plus />
@@ -975,8 +1286,16 @@ export default function App() {
 						</div>
 					</div>
 				) : null}
+				{(application?.sessions.length ?? 0) > 5 ? (
+					<input
+						value={sessionSearch}
+						onChange={event => setSessionSearch(event.target.value)}
+						placeholder="Search sessions…"
+						className="mt-1 h-7 w-full rounded-md border bg-background px-2 text-xs outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
+					/>
+				) : null}
 				<div className="mt-1 min-h-0 flex-1 space-y-1 overflow-y-auto">
-					{application?.sessions.map(item => {
+					{filteredSessions.map(item => {
 						const active = item.id === session?.sessionId || item.path === session?.sessionFile;
 						return (
 							<div
@@ -998,13 +1317,20 @@ export default function App() {
 												if (event.key === "Escape") setRenamingSession(undefined);
 											}}
 										/>
-										<Button size="icon" variant="ghost" className="size-6" onClick={renameSession}>
+										<Button
+											size="icon"
+											variant="ghost"
+											className="size-6"
+											aria-label="Save session name"
+											onClick={renameSession}
+										>
 											<Check />
 										</Button>
 										<Button
 											size="icon"
 											variant="ghost"
 											className="size-6"
+											aria-label="Cancel rename"
 											onClick={() => setRenamingSession(undefined)}
 										>
 											<X />
@@ -1059,6 +1385,7 @@ export default function App() {
 												variant="ghost"
 												className="size-6"
 												title="Clone session"
+												aria-label="Clone session"
 												onClick={() => runIntent({ type: "clone_session", sessionPath: item.path })}
 											>
 												<CopyPlus />
@@ -1068,6 +1395,7 @@ export default function App() {
 												variant="ghost"
 												className="size-6"
 												title="Fork session"
+												aria-label="Fork session"
 												onClick={() => runIntent({ type: "fork_session", sessionPath: item.path })}
 											>
 												<GitFork />
@@ -1077,6 +1405,7 @@ export default function App() {
 												variant="ghost"
 												className="size-6"
 												title="Export session"
+												aria-label="Export session"
 												onClick={() => void exportSession(item)}
 											>
 												<Download />
@@ -1086,6 +1415,7 @@ export default function App() {
 												variant="ghost"
 												className="size-6"
 												title="Rename session"
+												aria-label="Rename session"
 												onClick={() =>
 													setRenamingSession({
 														path: item.path,
@@ -1100,6 +1430,7 @@ export default function App() {
 												variant="ghost"
 												className="size-6"
 												title={active ? "The active session cannot be deleted" : "Delete session"}
+												aria-label={active ? "The active session cannot be deleted" : "Delete session"}
 												disabled={active}
 												onClick={() => setDeletingSessionPath(item.path)}
 											>
@@ -1111,6 +1442,9 @@ export default function App() {
 							</div>
 						);
 					})}
+					{application && application.sessions.length > 0 && filteredSessions.length === 0 ? (
+						<p className="px-2 py-2 text-xs text-muted-foreground">No sessions match "{sessionSearch}".</p>
+					) : null}
 					{application && application.sessions.length === 0 ? (
 						<div className="rounded-lg bg-sidebar-accent px-3 py-2">
 							<p className="truncate text-sm font-medium">{session?.sessionName || "Current session"}</p>
@@ -1139,6 +1473,14 @@ export default function App() {
 						<ListChecks />
 						Context
 					</button>
+					<button type="button" className="sidebar-action" onClick={() => setInspector("workflows")}>
+						<Compass />
+						Workflows
+					</button>
+					<button type="button" className="sidebar-action" onClick={() => setInspector("collab")}>
+						<Radio />
+						Collab{collabState?.hosting ? ` (${collabState.participants.length})` : ""}
+					</button>
 					<button type="button" className="sidebar-action" onClick={() => setInspector("settings")}>
 						<Settings2 />
 						Settings
@@ -1163,12 +1505,25 @@ export default function App() {
 				<header className="col-start-1 flex items-center border-b px-4">
 					<div className="min-w-0">
 						<h1 className="truncate text-sm font-medium">
-							{session?.sessionName || projectName(project ?? "Oh My Pi")}
+							{extensionTitle || session?.sessionName || projectName(project ?? "Oh My Pi")}
 						</h1>
 						<p className="truncate text-[11px] text-muted-foreground">
 							{session?.model ? `${session.model.provider} · ${session.model.name ?? session.model.id}` : status}
 						</p>
 					</div>
+					{Object.entries(extensionStatuses).length > 0 ? (
+						<div className="ml-3 flex items-center gap-1">
+							{Object.entries(extensionStatuses).map(([key, text]) => (
+								<span
+									key={key}
+									className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground"
+									title={key}
+								>
+									{text}
+								</span>
+							))}
+						</div>
+					) : null}
 					<div className="ml-auto flex items-center gap-1">
 						<Button
 							variant="ghost"
@@ -1196,7 +1551,13 @@ export default function App() {
 								/>
 							) : null}
 						</div>
-						<Button variant="ghost" size="icon" onClick={cycleAppearance} title="Change appearance">
+						<Button
+							variant="ghost"
+							size="icon"
+							onClick={cycleAppearance}
+							title="Change appearance"
+							aria-label="Change appearance"
+						>
 							{dark ? <Moon /> : <Sun />}
 						</Button>
 						<Button
@@ -1204,6 +1565,7 @@ export default function App() {
 							size="icon"
 							onClick={() => setInspector(value => (value ? undefined : "changes"))}
 							title="Toggle inspector"
+							aria-label="Toggle inspector"
 						>
 							<PanelRight />
 						</Button>
@@ -1253,6 +1615,7 @@ export default function App() {
 										size="icon"
 										className="size-6"
 										title="Restore to composer"
+										aria-label="Restore to composer"
 										onClick={() => restoreQueueItem(item)}
 									>
 										<Undo2 />
@@ -1262,12 +1625,39 @@ export default function App() {
 										size="icon"
 										className="size-6"
 										title="Remove queued message"
+										aria-label="Remove queued message"
 										onClick={() => runIntent({ type: "remove_queue_item", queueItemId: item.id })}
 									>
 										<X />
 									</Button>
 								</div>
 							))}
+						</div>
+					) : null}
+					{updateStatus?.updateAvailable && !updateBannerDismissed ? (
+						<div className="mx-auto mb-2 flex max-w-3xl items-center gap-3 rounded-lg border bg-card px-3 py-2 text-xs">
+							<Download className="size-3.5 shrink-0 text-muted-foreground" />
+							<span className="flex-1">
+								Oh My Pi {updateStatus.latestVersion} is available (you have {updateStatus.currentVersion}).
+							</span>
+							<Button
+								size="sm"
+								variant="outline"
+								className="h-6 px-2 text-[11px]"
+								onClick={() => openExternalUrl(updateStatus.downloadUrl)}
+							>
+								View download page
+							</Button>
+							<Button
+								variant="ghost"
+								size="icon"
+								className="size-6"
+								title="Dismiss"
+								aria-label="Dismiss update notice"
+								onClick={() => setUpdateBannerDismissed(true)}
+							>
+								<X />
+							</Button>
 						</div>
 					) : null}
 					{notice ? (
@@ -1290,6 +1680,18 @@ export default function App() {
 							) : null}
 						</div>
 					) : null}
+					{Object.entries(extensionWidgets)
+						.filter(([, widget]) => widget.placement === "aboveEditor")
+						.map(([key, widget]) => (
+							<div
+								key={key}
+								className="mx-auto mb-2 max-w-3xl rounded-lg border bg-card px-3 py-2 text-xs text-muted-foreground"
+							>
+								{widget.lines.map((line, index) => (
+									<p key={index}>{line}</p>
+								))}
+							</div>
+						))}
 					<div
 						className="composer relative mx-auto max-w-3xl"
 						onDragOver={event => {
@@ -1446,6 +1848,7 @@ export default function App() {
 								size="icon"
 								className="size-8"
 								title="Attach images"
+								aria-label="Attach images"
 								onClick={() => fileInput.current?.click()}
 							>
 								<ImagePlus />
@@ -1466,6 +1869,7 @@ export default function App() {
 									size="icon"
 									className="size-8"
 									title="Abort"
+									aria-label="Abort"
 									onClick={() => run({ type: "abort" })}
 								>
 									<Square className="size-3 fill-current" />
@@ -1475,6 +1879,7 @@ export default function App() {
 									size="icon"
 									className="size-8 rounded-full"
 									title="Send"
+									aria-label="Send"
 									disabled={(!draft.trim() && images.length === 0) || status !== "connected"}
 									onClick={send}
 								>
@@ -1483,6 +1888,18 @@ export default function App() {
 							)}
 						</div>
 					</div>
+					{Object.entries(extensionWidgets)
+						.filter(([, widget]) => widget.placement === "belowEditor")
+						.map(([key, widget]) => (
+							<div
+								key={key}
+								className="mx-auto mt-2 max-w-3xl rounded-lg border bg-card px-3 py-2 text-xs text-muted-foreground"
+							>
+								{widget.lines.map((line, index) => (
+									<p key={index}>{line}</p>
+								))}
+							</div>
+						))}
 				</div>
 
 				{inspector ? (
@@ -1510,6 +1927,36 @@ export default function App() {
 									variant="ghost"
 									size="sm"
 									onClick={() => void refreshContext()}
+								>
+									Refresh
+								</Button>
+							) : null}
+							{inspector === "workflows" && status === "connected" ? (
+								<Button
+									className="ml-auto mr-2"
+									variant="ghost"
+									size="sm"
+									onClick={() => void refreshWorkflows()}
+								>
+									Refresh
+								</Button>
+							) : null}
+							{inspector === "diagnostics" && status === "connected" ? (
+								<Button
+									className="ml-auto mr-2"
+									variant="ghost"
+									size="sm"
+									onClick={() => void refreshSessionStats()}
+								>
+									Refresh
+								</Button>
+							) : null}
+							{inspector === "collab" && status === "connected" ? (
+								<Button
+									className="ml-auto mr-2"
+									variant="ghost"
+									size="sm"
+									onClick={() => void refreshCollabState()}
 								>
 									Refresh
 								</Button>
@@ -1584,6 +2031,25 @@ export default function App() {
 									onAbortRetry={() => void runContextCommand({ type: "abort_retry" })}
 									onAbortJob={jobId => void runContextCommand({ type: "abort_async_job", jobId })}
 								/>
+							) : inspector === "workflows" ? (
+								<WorkflowsInspector
+									workflow={workflowState}
+									subagents={subagents}
+									loading={workflowsLoading}
+									onEnterPlan={workflowMode =>
+										void runWorkflowCommand({ type: "enter_plan_mode", workflow: workflowMode })
+									}
+									onExitPlan={() => void runWorkflowCommand({ type: "exit_plan_mode" })}
+									onGoalSet={(objective, tokenBudget) =>
+										void runWorkflowCommand({ type: "goal_set", objective, tokenBudget })
+									}
+									onGoalPause={() => void runWorkflowCommand({ type: "goal_pause" })}
+									onGoalResume={() => void runWorkflowCommand({ type: "goal_resume" })}
+									onGoalDrop={() => void runWorkflowCommand({ type: "goal_drop" })}
+									onGoalSetBudget={tokenBudget =>
+										void runWorkflowCommand({ type: "goal_set_budget", tokenBudget })
+									}
+								/>
 							) : inspector === "settings" ? (
 								<SettingsInspector
 									schema={settingsSchema}
@@ -1599,20 +2065,70 @@ export default function App() {
 									onReload={() => void reloadResources()}
 								/>
 							) : inspector === "diagnostics" ? (
-								<dl className="space-y-3 p-4">
+								<div className="space-y-4 p-4">
+									<dl className="space-y-3">
+										<div>
+											<dt className="text-xs">Connection</dt>
+											<dd className="text-foreground">{status}</dd>
+										</div>
+										<div>
+											<dt className="text-xs">Project</dt>
+											<dd className="break-all text-foreground">{project}</dd>
+										</div>
+										<div>
+											<dt className="text-xs">Session</dt>
+											<dd className="break-all text-foreground">{session?.sessionId}</dd>
+										</div>
+									</dl>
 									<div>
-										<dt className="text-xs">Connection</dt>
-										<dd className="text-foreground">{status}</dd>
+										<dt className="text-xs">Session stats</dt>
+										{sessionStatsLoading && !sessionStats ? (
+											<dd className="mt-1 flex items-center gap-2 text-foreground">
+												<LoaderCircle className="size-3 animate-spin" />
+												Loading…
+											</dd>
+										) : sessionStats ? (
+											<dd className="mt-1 space-y-1 text-foreground">
+												<p>
+													{sessionStats.userMessages} user · {sessionStats.assistantMessages} assistant ·{" "}
+													{sessionStats.toolCalls} tool calls
+												</p>
+												<p>
+													{sessionStats.tokens.total.toLocaleString()} tokens (
+													{sessionStats.tokens.input.toLocaleString()} in /{" "}
+													{sessionStats.tokens.output.toLocaleString()} out /{" "}
+													{sessionStats.tokens.cacheRead.toLocaleString()} cache read)
+												</p>
+												<p>${sessionStats.cost.toFixed(4)}</p>
+											</dd>
+										) : (
+											<dd className="mt-1 text-foreground">Not loaded.</dd>
+										)}
 									</div>
-									<div>
-										<dt className="text-xs">Project</dt>
-										<dd className="break-all text-foreground">{project}</dd>
-									</div>
-									<div>
-										<dt className="text-xs">Session</dt>
-										<dd className="break-all text-foreground">{session?.sessionId}</dd>
-									</div>
-								</dl>
+									<Button
+										size="sm"
+										variant="outline"
+										className="h-7 text-[11px]"
+										onClick={() => void handoffSession()}
+									>
+										Hand off session
+									</Button>
+								</div>
+							) : inspector === "collab" ? (
+								<CollabInspector
+									collab={collabState}
+									guest={collabGuestState}
+									loading={collabLoading}
+									relayUrl={collabRelayUrl}
+									onRelayUrlChange={setCollabRelayUrl}
+									onStart={() => void startCollab()}
+									onStop={() => void stopCollab()}
+									onOpenLink={openExternalUrl}
+									joinLink={collabJoinLink}
+									onJoinLinkChange={setCollabJoinLink}
+									onJoin={() => void joinCollab()}
+									onLeave={() => void leaveCollab()}
+								/>
 							) : (
 								<p className="p-4 text-xs">
 									This native workflow is part of the accepted Desktop Parity matrix.

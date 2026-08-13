@@ -13,7 +13,7 @@
 import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, compareVersions, isRecord, logger, readLines, Snowflake, VERSION } from "@oh-my-pi/pi-utils";
 import {
 	AgentSessionApplicationRuntime,
 	ApplicationController,
@@ -22,6 +22,8 @@ import {
 import { buildWorkspaceReview } from "../../application/workspace-review";
 import { loadCapability, reset as resetCapabilities } from "../../capability";
 import type { Prompt } from "../../capability/prompt";
+import { getLatestRelease } from "../../cli/update-cli";
+import { CollabHost, type CollabHostContext } from "../../collab/host";
 import {
 	getDefault,
 	getEnumValues,
@@ -60,11 +62,13 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { RpcCollabGuest } from "./rpc-collab-guest";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
+	RpcCollabState,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -82,10 +86,14 @@ import type {
 	RpcSettingDef,
 	RpcSettingValueEntry,
 	RpcSubagentSubscriptionLevel,
+	RpcWorkflowState,
 } from "./rpc-types";
 
 // Re-export types for consumers
 export type * from "./rpc-types";
+
+/** Official homepage/download page — matches the repo's own `homepage` field and README links. */
+const OFFICIAL_DOWNLOAD_URL = "https://omp.sh";
 
 export type PendingExtensionRequest = {
 	resolve: (response: RpcExtensionUIResponse) => void;
@@ -754,6 +762,60 @@ export async function runRpcMode(
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
 	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
+
+	// OMP workflows (plan/goal mode): tool-set snapshots taken on entry so exit/
+	// pause/drop/completion can restore exactly what was active before, mirroring
+	// the TUI's #planModePreviousTools/#goalModePreviousTools bookkeeping.
+	let planModePreviousTools: string[] | undefined;
+	let goalModePreviousTools: string[] | undefined;
+
+	const buildWorkflowState = (): RpcWorkflowState => ({
+		planSettingEnabled: session.settings.get("plan.enabled"),
+		goalSettingEnabled: session.settings.get("goal.enabled"),
+		plan: session.getPlanModeState(),
+		goal: session.getGoalModeState(),
+		advisor: session.getAdvisorStatusOverview(),
+	});
+
+	// Collaboration (host side). `collabHostContext` is the CollabHostContext
+	// CollabHost drives directly — its `collabHost` field is the single source
+	// of truth for "are we hosting" (CollabHost itself clears it on teardown,
+	// mirroring InteractiveModeContext.collabHost in the TUI).
+	const buildCollabState = (): RpcCollabState => {
+		const host = collabHostContext.collabHost;
+		return {
+			hosting: host !== undefined,
+			link: host?.link,
+			webLink: host?.webLink,
+			viewLink: host?.viewLink,
+			webViewLink: host?.webViewLink,
+			participants: host?.participants ?? [],
+		};
+	};
+	const collabHostContext: CollabHostContext = {
+		sessionManager: session.sessionManager,
+		session,
+		settings: session.settings,
+		eventBus,
+		collabHost: undefined,
+		showStatus: () => {},
+		updatePendingMessagesDisplay: () => {},
+		statusLine: {
+			setCollabStatus: () => output({ type: "collab_state_changed", data: buildCollabState() }),
+			invalidate: () => {},
+			getCachedContextBreakdown: () => {
+				const usage = session.getContextUsage();
+				return { usedTokens: usage?.tokens ?? 0, contextWindow: usage?.contextWindow ?? 0 };
+			},
+		},
+		ui: { requestRender: () => {} },
+	};
+	// Collaboration (guest side). Constructed on `collab_join`; cleared on
+	// `collab_leave` or when the host ends the session (its own `bye`/close
+	// handling calls back through `notifyApplicationChanged` but does not
+	// clear this reference itself, so `left` is checked before reuse).
+	let collabGuest: RpcCollabGuest | undefined;
+
 	const application = new ApplicationController(
 		new AgentSessionApplicationRuntime(session, { onSessionChanged: () => subagentRegistry?.clear() }),
 		output,
@@ -999,6 +1061,31 @@ export async function runRpcMode(
 	// Output all agent events as JSON
 	session.subscribe(event => {
 		output(event);
+		// The `goal` tool can complete the objective from inside the agent loop
+		// (no RPC command involved) — `mode: "exiting"` signals that transition.
+		// Mirror the TUI's #exitGoalMode(reason: "completed") cleanup so the
+		// restricted "goal" tool set never gets stuck active.
+		if (event.type === "goal_updated" && event.state?.mode === "exiting") {
+			const completedGoal = event.state.goal;
+			void (async () => {
+				try {
+					if (goalModePreviousTools) {
+						await session.setActiveToolsByName(goalModePreviousTools);
+						goalModePreviousTools = undefined;
+					}
+					session.setGoalModeState(undefined);
+					session.sessionManager.appendModeChange("none");
+					session.sessionManager.appendCustomEntry("goal-completed", {
+						objective: completedGoal.objective,
+						tokensUsed: completedGoal.tokensUsed,
+						tokenBudget: completedGoal.tokenBudget,
+						timeUsedSeconds: completedGoal.timeUsedSeconds,
+					});
+				} catch (err) {
+					logger.warn("failed to finalize completed goal", { err: String(err) });
+				}
+			})();
+		}
 	});
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
@@ -1056,6 +1143,15 @@ export async function runRpcMode(
 				});
 				if (builtinResult !== false) {
 					if ("prompt" in builtinResult) {
+						// A guest's local commands (/dump, /settings, ...) run against the
+						// replica as usual, but a residual prompt is real conversational
+						// content — it goes over the collab wire, not to a local agent turn.
+						if (collabGuest && !collabGuest.left) {
+							const sent = collabGuest.sendPrompt(builtinResult.prompt, command.images);
+							return sent
+								? success(id, "prompt", { agentInvoked: true })
+								: error(id, "prompt", "This collab link is read-only.");
+						}
 						watchAndReportLocalOnlyPromptResult({
 							id,
 							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
@@ -1066,6 +1162,13 @@ export async function runRpcMode(
 						return success(id, "prompt");
 					}
 					return success(id, "prompt", { agentInvoked: false });
+				}
+
+				if (collabGuest && !collabGuest.left) {
+					const sent = collabGuest.sendPrompt(command.message, command.images);
+					return sent
+						? success(id, "prompt", { agentInvoked: true })
+						: error(id, "prompt", "This collab link is read-only.");
 				}
 
 				// Don't await - events will stream
@@ -1086,16 +1189,28 @@ export async function runRpcMode(
 			}
 
 			case "steer": {
+				if (collabGuest && !collabGuest.left) {
+					const sent = collabGuest.sendPrompt(command.message, command.images);
+					return sent ? success(id, "steer") : error(id, "steer", "This collab link is read-only.");
+				}
 				await session.steer(command.message, command.images);
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
+				if (collabGuest && !collabGuest.left) {
+					const sent = collabGuest.sendPrompt(command.message, command.images);
+					return sent ? success(id, "follow_up") : error(id, "follow_up", "This collab link is read-only.");
+				}
 				await session.followUp(command.message, command.images);
 				return success(id, "follow_up");
 			}
 
 			case "abort": {
+				if (collabGuest && !collabGuest.left) {
+					const sent = collabGuest.sendAbort();
+					return sent ? success(id, "abort") : error(id, "abort", "This collab link is read-only.");
+				}
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				return success(id, "abort");
 			}
@@ -1111,6 +1226,9 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
+				if (collabGuest && !collabGuest.left) {
+					return error(id, command.type, "Leave the collab session first (collab_leave).");
+				}
 				const result = await handleRpcSessionChange(session, command, subagentRegistry);
 				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
 				return success(id, result.type, result.data);
@@ -1240,6 +1358,153 @@ export async function runRpcMode(
 					return success(id, "get_subagent_messages", transcript);
 				} catch (err) {
 					return error(id, "get_subagent_messages", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			// =================================================================
+			// OMP workflows (plan/goal mode, advisor status)
+			// =================================================================
+
+			case "get_workflow_state": {
+				return success(id, "get_workflow_state", buildWorkflowState());
+			}
+
+			case "enter_plan_mode": {
+				if (!session.settings.get("plan.enabled")) {
+					return error(id, "enter_plan_mode", "Plan mode is disabled in settings.");
+				}
+				if (session.getGoalModeState()?.enabled) {
+					return error(id, "enter_plan_mode", "Exit goal mode first.");
+				}
+				if (session.getPlanModeState()?.enabled) {
+					return success(id, "enter_plan_mode", buildWorkflowState());
+				}
+				try {
+					const planFilePath = session.getPlanReferencePath() || "local://PLAN.md";
+					const previousTools = session.getEnabledToolNames();
+					const augmentations = session.hasBuiltInTool("write") ? ["write"] : [];
+					planModePreviousTools = previousTools;
+					await session.setActiveToolsByName([...new Set([...previousTools, ...augmentations])]);
+					session.setPlanModeState({
+						enabled: true,
+						planFilePath,
+						workflow: command.workflow ?? "parallel",
+					});
+					session.setPlanProposalHandler?.(title => session.preparePlanForReview(title));
+					if (session.isStreaming) await session.sendPlanModeContext({ deliverAs: "steer" });
+					session.sessionManager.appendModeChange("plan", { planFilePath });
+					return success(id, "enter_plan_mode", buildWorkflowState());
+				} catch (err) {
+					planModePreviousTools = undefined;
+					return error(id, "enter_plan_mode", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "exit_plan_mode": {
+				if (!session.getPlanModeState()?.enabled) {
+					return success(id, "exit_plan_mode", buildWorkflowState());
+				}
+				try {
+					session.setPlanModeState(undefined);
+					session.setPlanProposalHandler?.(null);
+					if (planModePreviousTools) {
+						await session.setActiveToolsByName(planModePreviousTools);
+						planModePreviousTools = undefined;
+					}
+					session.sessionManager.appendModeChange("none");
+					return success(id, "exit_plan_mode", buildWorkflowState());
+				} catch (err) {
+					return error(id, "exit_plan_mode", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "goal_set": {
+				if (!session.settings.get("goal.enabled")) {
+					return error(id, "goal_set", "Goal mode is disabled in settings.");
+				}
+				if (session.getPlanModeState()?.enabled) {
+					return error(id, "goal_set", "Exit plan mode first.");
+				}
+				const objective = command.objective.trim();
+				if (!objective) return error(id, "goal_set", "objective is required.");
+				try {
+					const existing = session.getGoalModeState();
+					const replacing =
+						existing?.goal !== undefined &&
+						existing.goal.status !== "dropped" &&
+						existing.goal.status !== "complete";
+					// GoalRuntime's setState host callback already syncs the returned
+					// state onto the session — no need to call setGoalModeState again.
+					if (replacing) {
+						await session.goalRuntime.replaceGoal({ objective, tokenBudget: command.tokenBudget });
+					} else {
+						await session.goalRuntime.createGoal({ objective, tokenBudget: command.tokenBudget });
+					}
+					const previousTools = session.getEnabledToolNames().filter(name => name !== "goal");
+					goalModePreviousTools = previousTools;
+					await session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+					if (session.isStreaming) await session.sendGoalModeContext({ deliverAs: "steer" });
+					return success(id, "goal_set", buildWorkflowState());
+				} catch (err) {
+					return error(id, "goal_set", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "goal_resume": {
+				if (!session.settings.get("goal.enabled")) {
+					return error(id, "goal_resume", "Goal mode is disabled in settings.");
+				}
+				if (session.getPlanModeState()?.enabled) {
+					return error(id, "goal_resume", "Exit plan mode first.");
+				}
+				try {
+					await session.goalRuntime.resumeGoal();
+					const previousTools = session.getEnabledToolNames().filter(name => name !== "goal");
+					goalModePreviousTools = previousTools;
+					await session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+					if (session.isStreaming) await session.sendGoalModeContext({ deliverAs: "steer" });
+					return success(id, "goal_resume", buildWorkflowState());
+				} catch (err) {
+					return error(id, "goal_resume", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "goal_pause": {
+				try {
+					// pauseGoal()'s setState host callback already syncs the session.
+					await session.goalRuntime.pauseGoal();
+					if (goalModePreviousTools) {
+						await session.setActiveToolsByName(goalModePreviousTools);
+						goalModePreviousTools = undefined;
+					}
+					return success(id, "goal_pause", buildWorkflowState());
+				} catch (err) {
+					return error(id, "goal_pause", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "goal_drop": {
+				try {
+					// dropGoal() already clears the session's goal state and persists
+					// "none" via its host callbacks — do not repeat either here.
+					await session.goalRuntime.dropGoal();
+					if (goalModePreviousTools) {
+						await session.setActiveToolsByName(goalModePreviousTools);
+						goalModePreviousTools = undefined;
+					}
+					return success(id, "goal_drop", buildWorkflowState());
+				} catch (err) {
+					return error(id, "goal_drop", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "goal_set_budget": {
+				try {
+					// onBudgetMutated()'s setState host callback already syncs the session.
+					await session.goalRuntime.onBudgetMutated(command.tokenBudget);
+					return success(id, "goal_set_budget", buildWorkflowState());
+				} catch (err) {
+					return error(id, "goal_set_budget", err instanceof Error ? err.message : String(err));
 				}
 			}
 
@@ -1688,6 +1953,100 @@ export async function runRpcMode(
 				}
 			}
 
+			// =================================================================
+			// Release updates
+			// =================================================================
+
+			case "get_update_status": {
+				const base = { currentVersion: VERSION, downloadUrl: OFFICIAL_DOWNLOAD_URL, checkedAt: Date.now() };
+				try {
+					const release = await getLatestRelease({ timeoutMs: 10_000 });
+					return success(id, "get_update_status", {
+						...base,
+						latestVersion: release.version,
+						updateAvailable: compareVersions(release.version, VERSION) > 0,
+					});
+				} catch (err) {
+					return success(id, "get_update_status", {
+						...base,
+						updateAvailable: false,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				}
+			}
+
+			// =================================================================
+			// Collaboration (host side)
+			// =================================================================
+
+			case "collab_start": {
+				if (collabHostContext.collabHost) return success(id, "collab_start", buildCollabState());
+				if (collabGuest && !collabGuest.left) return error(id, "collab_start", "Leave the collab session first.");
+				const relayInput = command.relayUrl || session.settings.get("collab.relayUrl") || "";
+				if (!relayInput) {
+					return error(
+						id,
+						"collab_start",
+						"No relay configured. Set collab.relayUrl in settings or pass relayUrl.",
+					);
+				}
+				// Scheme-less relay input defaults to wss (ws:// must be spelled out for localhost).
+				const relayUrl = relayInput.includes("://") ? relayInput : `wss://${relayInput}`;
+				const webUrl = command.webUrl || session.settings.get("collab.webUrl") || "";
+				const host = new CollabHost(collabHostContext);
+				try {
+					await host.start(relayUrl, webUrl);
+				} catch (err) {
+					return error(id, "collab_start", err instanceof Error ? err.message : String(err));
+				}
+				collabHostContext.collabHost = host;
+				return success(id, "collab_start", buildCollabState());
+			}
+
+			case "collab_stop": {
+				const host = collabHostContext.collabHost;
+				if (!host) return success(id, "collab_stop", buildCollabState());
+				await host.stop("host stopped");
+				return success(id, "collab_stop", buildCollabState());
+			}
+
+			case "get_collab_state": {
+				return success(id, "get_collab_state", buildCollabState());
+			}
+
+			case "collab_join": {
+				if (collabGuest && !collabGuest.left) {
+					return error(id, "collab_join", "Already in a collab session (leave first).");
+				}
+				if (collabHostContext.collabHost) {
+					return error(id, "collab_join", "Stop hosting first.");
+				}
+				const guest = new RpcCollabGuest({
+					session,
+					settings: session.settings,
+					eventBus,
+					output,
+					uiContext: rpcUiContext,
+					notifyApplicationChanged: () => application.notifyExternalChange(),
+				});
+				try {
+					await guest.join(command.link);
+				} catch (err) {
+					return error(id, "collab_join", err instanceof Error ? err.message : String(err));
+				}
+				collabGuest = guest;
+				await emitAvailableCommandsUpdate();
+				return success(id, "collab_join", { joined: true, readOnly: guest.readOnly, state: guest.state });
+			}
+
+			case "collab_leave": {
+				if (!collabGuest || collabGuest.left) return success(id, "collab_leave");
+				await collabGuest.leave();
+				collabGuest = undefined;
+				await emitAvailableCommandsUpdate();
+				return success(id, "collab_leave");
+			}
+
 			default: {
 				const unknownCommand = command as { type: string };
 				return error(undefined, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
@@ -1702,6 +2061,10 @@ export async function runRpcMode(
 	const shutdownCoordinator = new RpcShutdownCoordinator({
 		isShutdownRequested: () => shutdownState.requested,
 		performShutdown: async () => {
+			// Say goodbye to any collab guests before the socket goes away with the
+			// process, so they see a clean "host stopped" instead of an abrupt drop.
+			await collabHostContext.collabHost?.stop("host process exiting");
+			if (collabGuest && !collabGuest.left) await collabGuest.leave();
 			// Route through the idempotent session.dispose() so the browser
 			// reaper (releaseTabsForOwner) and other bounded teardown run before
 			// the process exits. dispose() also emits `session_shutdown`, so we

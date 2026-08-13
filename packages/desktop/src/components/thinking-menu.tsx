@@ -1,4 +1,5 @@
 import { Check } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { DESKTOP_THINKING_LEVELS } from "@/lib/desktop-protocol";
 import { cn } from "@/lib/utils";
 
@@ -11,6 +12,20 @@ export interface ThinkingMenuProps {
 
 export function ThinkingMenu({ levels, current, onSelect, onClose }: ThinkingMenuProps) {
 	const options = levels && levels.length > 0 ? levels : DESKTOP_THINKING_LEVELS;
+	const currentRef = useRef<HTMLButtonElement>(null);
+
+	useEffect(() => {
+		currentRef.current?.focus();
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape") {
+				event.preventDefault();
+				onClose();
+			}
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [onClose]);
+
 	return (
 		<>
 			<button
@@ -19,10 +34,16 @@ export function ThinkingMenu({ levels, current, onSelect, onClose }: ThinkingMen
 				className="fixed inset-0 z-40 cursor-default"
 				onClick={onClose}
 			/>
-			<div className="absolute top-full right-0 z-50 mt-1 min-w-32 rounded-lg border bg-card p-1 shadow-lg">
+			<div
+				className="absolute top-full right-0 z-50 mt-1 min-w-32 rounded-lg border bg-card p-1 shadow-lg"
+				role="menu"
+			>
 				{options.map(level => (
 					<button
 						type="button"
+						role="menuitemradio"
+						aria-checked={level === current}
+						ref={level === current ? currentRef : undefined}
 						key={level}
 						className={cn(
 							"flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs capitalize hover:bg-accent",

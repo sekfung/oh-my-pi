@@ -1,5 +1,5 @@
 import { Search, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +20,11 @@ export interface CommandPaletteProps {
 export function CommandPalette({ actions, onClose }: CommandPaletteProps) {
 	const [query, setQuery] = useState("");
 	const [highlightIndex, setHighlightIndex] = useState(0);
+
+	useEffect(() => {
+		const previouslyFocused = document.activeElement as HTMLElement | null;
+		return () => previouslyFocused?.focus();
+	}, []);
 
 	const filtered = useMemo(() => {
 		const needle = query.trim().toLowerCase();
@@ -79,7 +84,13 @@ export function CommandPalette({ actions, onClose }: CommandPaletteProps) {
 						placeholder="Search commands and operations…"
 						className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
 					/>
-					<Button variant="ghost" size="icon" className="size-7 shrink-0" onClick={onClose}>
+					<Button
+						variant="ghost"
+						size="icon"
+						className="size-7 shrink-0"
+						onClick={onClose}
+						aria-label="Close command palette"
+					>
 						<X className="size-4" />
 					</Button>
 				</div>

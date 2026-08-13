@@ -1,5 +1,5 @@
 import { Brain, Check, LoaderCircle, Search, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { DesktopAvailableModel } from "@/lib/desktop-protocol";
 import { cn } from "@/lib/utils";
@@ -19,6 +19,21 @@ function formatContextWindow(tokens: number | null): string | undefined {
 
 export function ModelPicker({ models, loading, current, onSelect, onClose }: ModelPickerProps) {
 	const [query, setQuery] = useState("");
+
+	useEffect(() => {
+		const previouslyFocused = document.activeElement as HTMLElement | null;
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape") {
+				event.preventDefault();
+				onClose();
+			}
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => {
+			window.removeEventListener("keydown", onKeyDown);
+			previouslyFocused?.focus();
+		};
+	}, [onClose]);
 
 	const grouped = useMemo(() => {
 		const needle = query.trim().toLowerCase();
@@ -51,7 +66,13 @@ export function ModelPicker({ models, loading, current, onSelect, onClose }: Mod
 					<h2 id="model-picker-title" className="text-sm font-semibold">
 						Select a model
 					</h2>
-					<Button variant="ghost" size="icon" className="ml-auto size-7" onClick={onClose}>
+					<Button
+						variant="ghost"
+						size="icon"
+						className="ml-auto size-7"
+						onClick={onClose}
+						aria-label="Close model picker"
+					>
 						<X className="size-4" />
 					</Button>
 				</div>

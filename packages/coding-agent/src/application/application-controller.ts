@@ -137,6 +137,18 @@ export class ApplicationController {
 		this.#unsubscribe();
 	}
 
+	/**
+	 * Force a revision bump and `application_changed` emission for a runtime
+	 * change made outside the normal intent path — e.g. a collab guest join/leave
+	 * swapping the active session to a replica file that `switch_session`
+	 * intents would reject (it lives outside the listed sessions directory).
+	 * Uses the same counters and emission path as every other mutation, so a
+	 * subsequent intent's `expectedRevision` check stays consistent.
+	 */
+	notifyExternalChange(): void {
+		this.#changed("external");
+	}
+
 	#enqueueMutation(request: ApplicationIntentRequest): Promise<ApplicationIntentResult> {
 		const result = this.#mutationTail.then(async () => {
 			if (request.expectedRevision !== this.#revision) {

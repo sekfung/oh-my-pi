@@ -7,14 +7,18 @@
 import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
+import type { AdvisorRuntimeStatus } from "../../advisor/config";
 import type {
 	ApplicationIntentRequest,
 	ApplicationIntentResult,
 	ApplicationSnapshot,
 	WorkspaceReview,
 } from "../../application/application-types";
+import type { CollabSessionState } from "../../collab/protocol";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage, ToolApprovalChoice, ToolApprovalUIRequest } from "../../extensibility/extensions/types";
+import type { GoalModeState } from "../../goals/state";
+import type { PlanModeState } from "../../plan-mode/state";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
@@ -56,6 +60,16 @@ export type RpcCommand =
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+
+	// OMP workflows (plan/goal mode, advisor status)
+	| { id?: string; type: "get_workflow_state" }
+	| { id?: string; type: "enter_plan_mode"; workflow?: "parallel" | "iterative" }
+	| { id?: string; type: "exit_plan_mode" }
+	| { id?: string; type: "goal_set"; objective: string; tokenBudget?: number }
+	| { id?: string; type: "goal_pause" }
+	| { id?: string; type: "goal_resume" }
+	| { id?: string; type: "goal_drop" }
+	| { id?: string; type: "goal_set_budget"; tokenBudget?: number }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -125,7 +139,19 @@ export type RpcCommand =
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
-	| { id?: string; type: "login"; providerId: string };
+	| { id?: string; type: "login"; providerId: string }
+
+	// Release updates (check-only; no signed auto-updater yet)
+	| { id?: string; type: "get_update_status" }
+
+	// Collaboration (host side)
+	| { id?: string; type: "collab_start"; relayUrl?: string; webUrl?: string }
+	| { id?: string; type: "collab_stop" }
+	| { id?: string; type: "get_collab_state" }
+
+	// Collaboration (guest side — join another host's session)
+	| { id?: string; type: "collab_join"; link: string }
+	| { id?: string; type: "collab_leave" };
 
 // ============================================================================
 // RPC State
@@ -317,6 +343,79 @@ export interface RpcSubagentSnapshot {
 	parentToolCallId?: string;
 }
 
+/** Advisor runtime status projection — mirrors `AgentSession#getAdvisorStatusOverview`. */
+export interface RpcAdvisorOverview {
+	configured: boolean;
+	advisors: Array<{ name: string; status: AdvisorRuntimeStatus }>;
+}
+
+/**
+ * Combined plan/goal/advisor projection for the desktop Workflows panel.
+ * Subagents are surfaced separately via {@link RpcSubagentSnapshot} — this
+ * type is refetched after every plan/goal mutation and is otherwise kept in
+ * sync client-side from `goal_updated` session events.
+ */
+export interface RpcWorkflowState {
+	/** `settings.get("plan.enabled")` — plan mode is unavailable when false. */
+	planSettingEnabled: boolean;
+	/** `settings.get("goal.enabled")` — goal mode is unavailable when false. */
+	goalSettingEnabled: boolean;
+	plan?: PlanModeState;
+	goal?: GoalModeState;
+	advisor: RpcAdvisorOverview;
+}
+
+/**
+ * Best-effort release check against the npm registry — the same catalog
+ * `omp update` uses. `error` is set (and `latestVersion`/`updateAvailable`
+ * omitted) when the check itself failed (offline, registry unreachable);
+ * hosts should treat that as "no update known", not as a fatal condition.
+ */
+export interface RpcUpdateStatus {
+	currentVersion: string;
+	latestVersion?: string;
+	updateAvailable: boolean;
+	downloadUrl: string;
+	checkedAt: number;
+	error?: string;
+}
+
+export interface RpcCollabParticipant {
+	name: string;
+	role: "host" | "guest";
+	readOnly?: boolean;
+}
+
+/** Host-side collab state — mirrors `CollabHost`'s public getters (see `../../collab/host`). */
+export interface RpcCollabState {
+	hosting: boolean;
+	link?: string;
+	webLink?: string;
+	viewLink?: string;
+	webViewLink?: string;
+	participants: RpcCollabParticipant[];
+}
+
+/** Pushed whenever a guest joins/leaves a hosted collab session. */
+export interface RpcCollabStateChangedFrame {
+	type: "collab_state_changed";
+	data: RpcCollabState;
+}
+
+/** This RPC session's own guest membership in someone else's hosted collab session. */
+export interface RpcCollabGuestState {
+	joined: boolean;
+	readOnly: boolean;
+	/** Debounced footer snapshot from the host — model/thinking/cwd/streaming/participants. */
+	state: CollabSessionState | null;
+}
+
+/** Pushed on join/leave/reconnect/state-update while this RPC session is a collab guest. */
+export interface RpcCollabGuestStateFrame {
+	type: "collab_guest_state";
+	data: RpcCollabGuestState;
+}
+
 export interface RpcSubagentMessagesResult {
 	sessionFile: string;
 	fromByte: number;
@@ -410,6 +509,16 @@ export type RpcResponse =
 			success: true;
 			data: RpcSubagentMessagesResult;
 	  }
+
+	// OMP workflows
+	| { id?: string; type: "response"; command: "get_workflow_state"; success: true; data: RpcWorkflowState }
+	| { id?: string; type: "response"; command: "enter_plan_mode"; success: true; data: RpcWorkflowState }
+	| { id?: string; type: "response"; command: "exit_plan_mode"; success: true; data: RpcWorkflowState }
+	| { id?: string; type: "response"; command: "goal_set"; success: true; data: RpcWorkflowState }
+	| { id?: string; type: "response"; command: "goal_pause"; success: true; data: RpcWorkflowState }
+	| { id?: string; type: "response"; command: "goal_resume"; success: true; data: RpcWorkflowState }
+	| { id?: string; type: "response"; command: "goal_drop"; success: true; data: RpcWorkflowState }
+	| { id?: string; type: "response"; command: "goal_set_budget"; success: true; data: RpcWorkflowState }
 
 	// Model
 	| {
@@ -530,6 +639,18 @@ export type RpcResponse =
 			data: { providers: Array<{ id: string; name: string; available: boolean; authenticated: boolean }> };
 	  }
 	| { id?: string; type: "response"; command: "login"; success: true; data: { providerId: string } }
+
+	// Release updates
+	| { id?: string; type: "response"; command: "get_update_status"; success: true; data: RpcUpdateStatus }
+
+	// Collaboration (host side)
+	| { id?: string; type: "response"; command: "collab_start"; success: true; data: RpcCollabState }
+	| { id?: string; type: "response"; command: "collab_stop"; success: true; data: RpcCollabState }
+	| { id?: string; type: "response"; command: "get_collab_state"; success: true; data: RpcCollabState }
+
+	// Collaboration (guest side)
+	| { id?: string; type: "response"; command: "collab_join"; success: true; data: RpcCollabGuestState }
+	| { id?: string; type: "response"; command: "collab_leave"; success: true }
 
 	// Error response (any command can fail); `code` is an optional machine-readable reason.
 	| { id?: string; type: "response"; command: string; success: false; error: string; code?: string };
