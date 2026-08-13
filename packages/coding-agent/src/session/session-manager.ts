@@ -2544,6 +2544,31 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		options?: { suppressBreadcrumb?: boolean; sessionFile?: string },
 	): Promise<SessionManager> {
+		return SessionManager.#copyFrom(sourcePath, cwd, sessionDir, storage, { ...options, lineage: true });
+	}
+
+	/**
+	 * Clone a session into the current project directory: an independent copy of
+	 * the source history in a fresh session file with no fork lineage, so the two
+	 * sessions never join into one branch tree.
+	 */
+	static async cloneFrom(
+		sourcePath: string,
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		options?: { suppressBreadcrumb?: boolean; sessionFile?: string },
+	): Promise<SessionManager> {
+		return SessionManager.#copyFrom(sourcePath, cwd, sessionDir, storage, { ...options, lineage: false });
+	}
+
+	static async #copyFrom(
+		sourcePath: string,
+		cwd: string,
+		sessionDir: string | undefined,
+		storage: SessionStorage,
+		options: { suppressBreadcrumb?: boolean; sessionFile?: string; lineage: boolean },
+	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
@@ -2555,10 +2580,12 @@ export class SessionManager {
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
 		manager.#resetToNewSession(
-			{
-				parentSession: sourceHeader?.id,
-				providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
-			},
+			options.lineage
+				? {
+						parentSession: sourceHeader?.id,
+						providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
+					}
+				: undefined,
 			options?.sessionFile,
 		);
 		manager.#header.title = sourceHeader?.title;

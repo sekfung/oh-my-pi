@@ -9,6 +9,7 @@
 ### Added
 
 - Added the authoritative desktop application projection with native session and queue management, project-scoped four-state tool approvals for RPC hosts, and the `omp gui --project <path>` desktop launcher.
+- Added desktop session clone, fork, import, and export intents, a journal session-tree projection with navigation, labeling, and fork-from-entry, and a read-only Files/Changes workspace review command.
 - Added Astral `ty` as a built-in fallback Python LSP server (`ty server`), ordered behind `pyright`, `basedpyright`, and `pylsp`.
 - Added first-party Nix support, including reproducible source builds for Linux and macOS, a pinned development shell, NixOS and Home Manager modules, and offline Bun dependency support.
 - Added support for per-agent advisors configured via the `advisor` frontmatter field or the `task.agentAdvisor` settings, allowing different agents to be advised by different models.

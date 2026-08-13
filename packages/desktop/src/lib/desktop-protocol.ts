@@ -9,6 +9,7 @@ export type DesktopRpcCommand =
 	| { type: "get_state" }
 	| { type: "get_messages" }
 	| { type: "get_application_snapshot" }
+	| { type: "get_workspace_review" }
 	| {
 			type: "execute_application_intent";
 			intentId: string;
@@ -18,6 +19,13 @@ export type DesktopRpcCommand =
 				| { type: "switch_session"; sessionPath: string }
 				| { type: "rename_session"; sessionPath: string; title: string }
 				| { type: "delete_session"; sessionPath: string }
+				| { type: "clone_session"; sessionPath: string }
+				| { type: "fork_session"; sessionPath: string }
+				| { type: "import_session"; path: string; source: "claude" | "codex" }
+				| { type: "export_session"; sessionPath: string; format: "html" | "markdown"; outputPath: string }
+				| { type: "tree_navigate"; entryId: string }
+				| { type: "tree_fork"; entryId: string }
+				| { type: "tree_label"; entryId: string; label?: string }
 				| { type: "remove_queue_item"; queueItemId: string }
 				| { type: "clear_queue" };
 	  }
@@ -74,6 +82,21 @@ export interface DesktopSessionState {
 		items: DesktopQueuedMessage[];
 		hiddenCount: number;
 	};
+	tree: DesktopSessionTree;
+}
+
+export interface DesktopSessionTreeNode {
+	id: string;
+	parentId: string | null;
+	type: string;
+	label?: string;
+	timestamp: string;
+	preview: string;
+}
+
+export interface DesktopSessionTree {
+	nodes: DesktopSessionTreeNode[];
+	leafId: string | null;
 }
 
 export interface DesktopQueuedMessage {
@@ -91,6 +114,7 @@ export interface DesktopApplicationSession {
 	modifiedAt: string;
 	messageCount: number;
 	firstMessage: string;
+	parentSessionPath?: string;
 	status: "complete" | "interrupted" | "aborted" | "error" | "pending" | "unknown";
 }
 
@@ -109,6 +133,13 @@ export type DesktopApplicationIntent =
 	| { type: "switch_session"; sessionPath: string }
 	| { type: "rename_session"; sessionPath: string; title: string }
 	| { type: "delete_session"; sessionPath: string }
+	| { type: "clone_session"; sessionPath: string }
+	| { type: "fork_session"; sessionPath: string }
+	| { type: "import_session"; path: string; source: "claude" | "codex" }
+	| { type: "export_session"; sessionPath: string; format: "html" | "markdown"; outputPath: string }
+	| { type: "tree_navigate"; entryId: string }
+	| { type: "tree_fork"; entryId: string }
+	| { type: "tree_label"; entryId: string; label?: string }
 	| { type: "remove_queue_item"; queueItemId: string }
 	| { type: "clear_queue" };
 
@@ -116,6 +147,28 @@ export interface DesktopApplicationIntentResult {
 	intentId: string;
 	applied: boolean;
 	snapshot: DesktopApplicationSnapshot;
+}
+
+export interface DesktopWorkspaceReviewChange {
+	path: string;
+	staged: boolean;
+	unstaged: boolean;
+	untracked: boolean;
+	diff: string;
+}
+
+export interface DesktopWorkspaceReview {
+	repository?: {
+		root: string;
+		branch?: string;
+	};
+	changes: {
+		summary: { staged: number; unstaged: number; untracked: number };
+		entries: DesktopWorkspaceReviewChange[];
+		truncated: boolean;
+	};
+	files: Array<{ path: string; kind: "file" | "directory" }>;
+	filesTruncated: boolean;
 }
 
 export type DesktopToolApprovalChoice = "allow_once" | "allow_project" | "deny_once" | "deny_project";
@@ -221,6 +274,27 @@ function readQueuedMessage(value: unknown): DesktopQueuedMessage {
 	return { id: value.id, delivery: value.delivery, text: value.text, images };
 }
 
+function readSessionTreeNode(value: unknown): DesktopSessionTreeNode {
+	if (
+		!isRecord(value) ||
+		typeof value.id !== "string" ||
+		(value.parentId !== null && typeof value.parentId !== "string") ||
+		typeof value.type !== "string" ||
+		typeof value.timestamp !== "string" ||
+		typeof value.preview !== "string"
+	) {
+		throw new Error("Sidecar returned an invalid session tree node");
+	}
+	return {
+		id: value.id,
+		parentId: value.parentId as string | null,
+		type: value.type,
+		...(typeof value.label === "string" ? { label: value.label } : {}),
+		timestamp: value.timestamp,
+		preview: value.preview,
+	};
+}
+
 export function readSessionState(value: unknown): DesktopSessionState {
 	if (!isRecord(value) || typeof value.sessionId !== "string")
 		throw new Error("Sidecar returned invalid session state");
@@ -233,6 +307,7 @@ export function readSessionState(value: unknown): DesktopSessionState {
 				}
 			: undefined;
 	const queue = isRecord(value.queue) ? value.queue : undefined;
+	const tree = isRecord(value.tree) ? value.tree : undefined;
 	return {
 		model,
 		thinkingLevel: typeof value.thinkingLevel === "string" ? value.thinkingLevel : undefined,
@@ -246,6 +321,10 @@ export function readSessionState(value: unknown): DesktopSessionState {
 		queue: {
 			items: Array.isArray(queue?.items) ? queue.items.map(readQueuedMessage) : [],
 			hiddenCount: typeof queue?.hiddenCount === "number" ? queue.hiddenCount : 0,
+		},
+		tree: {
+			nodes: Array.isArray(tree?.nodes) ? tree.nodes.map(readSessionTreeNode) : [],
+			leafId: typeof tree?.leafId === "string" ? tree.leafId : null,
 		},
 	};
 }
@@ -281,6 +360,7 @@ function readApplicationSession(value: unknown): DesktopApplicationSession {
 		modifiedAt: value.modifiedAt,
 		messageCount: typeof value.messageCount === "number" ? value.messageCount : 0,
 		firstMessage: typeof value.firstMessage === "string" ? value.firstMessage : "",
+		...(typeof value.parentSessionPath === "string" ? { parentSessionPath: value.parentSessionPath } : {}),
 		status,
 	};
 }
@@ -323,6 +403,60 @@ export function readApplicationIntentResult(value: unknown): DesktopApplicationI
 		intentId: value.intentId,
 		applied: value.applied,
 		snapshot: readApplicationSnapshot(value.snapshot),
+	};
+}
+
+export function readWorkspaceReview(value: unknown): DesktopWorkspaceReview {
+	if (
+		!isRecord(value) ||
+		!isRecord(value.changes) ||
+		!Array.isArray(value.changes.entries) ||
+		!Array.isArray(value.files)
+	) {
+		throw new Error("Sidecar returned an invalid workspace review");
+	}
+	const summary = isRecord(value.changes.summary) ? value.changes.summary : {};
+	const repositorySource = isRecord(value.repository) ? value.repository : undefined;
+	const repositoryRoot =
+		repositorySource && typeof repositorySource.root === "string" ? repositorySource.root : undefined;
+	return {
+		...(repositoryRoot
+			? {
+					repository: {
+						root: repositoryRoot,
+						...(repositorySource && typeof repositorySource.branch === "string"
+							? { branch: repositorySource.branch }
+							: {}),
+					},
+				}
+			: {}),
+		changes: {
+			summary: {
+				staged: typeof summary.staged === "number" ? summary.staged : 0,
+				unstaged: typeof summary.unstaged === "number" ? summary.unstaged : 0,
+				untracked: typeof summary.untracked === "number" ? summary.untracked : 0,
+			},
+			entries: value.changes.entries.map(entry => {
+				if (!isRecord(entry) || typeof entry.path !== "string" || typeof entry.diff !== "string") {
+					throw new Error("Sidecar returned an invalid workspace change");
+				}
+				return {
+					path: entry.path,
+					staged: entry.staged === true,
+					unstaged: entry.unstaged === true,
+					untracked: entry.untracked === true,
+					diff: entry.diff,
+				};
+			}),
+			truncated: value.changes.truncated === true,
+		},
+		files: value.files.map(file => {
+			if (!isRecord(file) || typeof file.path !== "string" || (file.kind !== "file" && file.kind !== "directory")) {
+				throw new Error("Sidecar returned an invalid workspace file");
+			}
+			return { path: file.path, kind: file.kind };
+		}),
+		filesTruncated: value.filesTruncated === true,
 	};
 }
 

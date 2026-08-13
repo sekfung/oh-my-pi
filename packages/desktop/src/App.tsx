@@ -1,13 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
 	Bot,
 	Check,
 	ChevronDown,
+	CopyPlus,
+	Download,
+	Files,
 	FolderGit2,
 	FolderOpen,
+	GitBranch,
 	GitCompareArrows,
+	GitFork,
 	ImagePlus,
 	ListOrdered,
 	LoaderCircle,
@@ -24,13 +29,16 @@ import {
 	TerminalSquare,
 	Trash2,
 	Undo2,
+	Upload,
 	X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import appIcon from "@/assets/app-icon-ui.png";
 import { HostInteraction } from "@/components/host-interaction";
+import { SessionTree } from "@/components/session-tree";
 import { TranscriptMessage } from "@/components/transcript-message";
 import { Button } from "@/components/ui/button";
+import { ChangesInspector, FilesInspector } from "@/components/workspace-review";
 import {
 	type DesktopApplicationIntent,
 	type DesktopApplicationSnapshot,
@@ -38,10 +46,12 @@ import {
 	type DesktopImageContent,
 	type DesktopQueuedMessage,
 	type DesktopSessionState,
+	type DesktopWorkspaceReview,
 	isHostInteraction,
 	readApplicationIntentResult,
 	readApplicationSnapshot,
 	readMessages,
+	readWorkspaceReview,
 } from "@/lib/desktop-protocol";
 import type { DesktopRpcCommand } from "@/lib/desktop-transport";
 import { TauriSidecarTransport } from "@/lib/desktop-transport";
@@ -51,7 +61,7 @@ const RECENT_PROJECTS_KEY = "omp.desktop.recent-projects";
 const APPEARANCE_KEY = "omp.desktop.appearance";
 
 type ConnectionStatus = "empty" | "connecting" | "connected" | "recovering" | "disconnected";
-type Inspector = "changes" | "files" | "tasks" | "diagnostics";
+type Inspector = "tree" | "files" | "changes" | "tasks" | "diagnostics";
 
 function loadRecentProjects(): string[] {
 	try {
@@ -96,6 +106,8 @@ export default function App() {
 	const [session, setSession] = useState<DesktopSessionState>();
 	const [application, setApplication] = useState<DesktopApplicationSnapshot>();
 	const [messages, setMessages] = useState<unknown[]>([]);
+	const [review, setReview] = useState<DesktopWorkspaceReview>();
+	const [reviewLoading, setReviewLoading] = useState(false);
 	const [draft, setDraft] = useState("");
 	const [images, setImages] = useState<Array<DesktopImageContent & { name: string }>>([]);
 	const [delivery, setDelivery] = useState<"steer" | "followUp">("followUp");
@@ -105,6 +117,7 @@ export default function App() {
 	const [inspector, setInspector] = useState<Inspector>();
 	const [renamingSession, setRenamingSession] = useState<{ path: string; title: string }>();
 	const [deletingSessionPath, setDeletingSessionPath] = useState<string>();
+	const [importingSource, setImportingSource] = useState<"claude" | "codex">();
 	const [appearance, setAppearance] = useState<"system" | "light" | "dark">(() => {
 		const saved = localStorage.getItem(APPEARANCE_KEY);
 		return saved === "light" || saved === "dark" ? saved : "system";
@@ -127,6 +140,20 @@ export default function App() {
 		setApplication(snapshot);
 		setSession(snapshot.activeSession);
 		setMessages(readMessages(messagesResponse.data));
+	}, [transport]);
+
+	const refreshReview = useCallback(async () => {
+		setReviewLoading(true);
+		try {
+			const response = await transport.request({ type: "get_workspace_review" });
+			if (!response.success) throw new Error(response.error);
+			if (response.command !== "get_workspace_review") throw new Error("Unexpected review response");
+			setReview(readWorkspaceReview(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setReviewLoading(false);
+		}
 	}, [transport]);
 
 	const connect = useCallback(
@@ -163,6 +190,10 @@ export default function App() {
 		query.addEventListener("change", changed);
 		return () => query.removeEventListener("change", changed);
 	}, []);
+
+	useEffect(() => {
+		if ((inspector === "files" || inspector === "changes") && status === "connected") void refreshReview();
+	}, [inspector, status, refreshReview]);
 
 	useEffect(() => {
 		let stopOpenProject: (() => void) | undefined;
@@ -338,6 +369,37 @@ export default function App() {
 		}
 	};
 
+	const exportSession = async (item: { path: string; id: string; title?: string }) => {
+		const defaultPath = `${(item.title ?? "omp-session").replace(/[^\w.-]+/g, "-")}-${item.id.slice(0, 8)}.html`;
+		const outputPath = await save({
+			defaultPath,
+			filters: [{ name: "HTML transcript", extensions: ["html"] }],
+		});
+		if (!outputPath) return;
+		if (await runIntent({ type: "export_session", sessionPath: item.path, format: "html", outputPath })) {
+			setNotice(`Session exported to ${outputPath}`);
+		}
+	};
+
+	const importSession = async (source: "claude" | "codex") => {
+		setImportingSource(undefined);
+		const selected = await open({
+			directory: false,
+			multiple: false,
+			filters: [{ name: "Session transcript", extensions: ["jsonl"] }],
+		});
+		if (typeof selected !== "string") return;
+		if (await runIntent({ type: "import_session", path: selected, source })) {
+			setNotice(`Imported ${source === "claude" ? "Claude" : "Codex"} session`);
+		}
+	};
+
+	const openPath = (absolutePath: string) => {
+		void invoke("open_path", { path: absolutePath }).catch(cause =>
+			setError(cause instanceof Error ? cause.message : String(cause)),
+		);
+	};
+
 	const addImages = async (files: FileList | null) => {
 		if (!files) return;
 		try {
@@ -417,16 +479,50 @@ export default function App() {
 				</button>
 				<div className="mt-5 flex items-center justify-between px-2">
 					<span className="text-xs font-medium text-muted-foreground">Sessions</span>
-					<Button
-						size="icon"
-						variant="ghost"
-						className="size-6"
-						title="New session"
-						onClick={() => runIntent({ type: "new_session" })}
-					>
-						<Plus />
-					</Button>
+					<span className="flex items-center gap-0.5">
+						<Button
+							size="icon"
+							variant="ghost"
+							className="size-6"
+							title="Import a Claude or Codex transcript"
+							onClick={() => setImportingSource(value => (value ? undefined : "claude"))}
+						>
+							<Upload />
+						</Button>
+						<Button
+							size="icon"
+							variant="ghost"
+							className="size-6"
+							title="New session"
+							onClick={() => runIntent({ type: "new_session" })}
+						>
+							<Plus />
+						</Button>
+					</span>
 				</div>
+				{importingSource ? (
+					<div className="mt-1 rounded-lg bg-sidebar-accent p-1.5">
+						<p className="px-1 text-[11px] text-muted-foreground">Import a transcript file:</p>
+						<div className="mt-1 flex gap-1">
+							<Button
+								size="sm"
+								variant="outline"
+								className="h-6 flex-1 text-[11px]"
+								onClick={() => void importSession("claude")}
+							>
+								Claude
+							</Button>
+							<Button
+								size="sm"
+								variant="outline"
+								className="h-6 flex-1 text-[11px]"
+								onClick={() => void importSession("codex")}
+							>
+								Codex
+							</Button>
+						</div>
+					</div>
+				) : null}
 				<div className="mt-1 min-h-0 flex-1 space-y-1 overflow-y-auto">
 					{application?.sessions.map(item => {
 						const active = item.id === session?.sessionId || item.path === session?.sessionFile;
@@ -510,6 +606,33 @@ export default function App() {
 												size="icon"
 												variant="ghost"
 												className="size-6"
+												title="Clone session"
+												onClick={() => runIntent({ type: "clone_session", sessionPath: item.path })}
+											>
+												<CopyPlus />
+											</Button>
+											<Button
+												size="icon"
+												variant="ghost"
+												className="size-6"
+												title="Fork session"
+												onClick={() => runIntent({ type: "fork_session", sessionPath: item.path })}
+											>
+												<GitFork />
+											</Button>
+											<Button
+												size="icon"
+												variant="ghost"
+												className="size-6"
+												title="Export session"
+												onClick={() => void exportSession(item)}
+											>
+												<Download />
+											</Button>
+											<Button
+												size="icon"
+												variant="ghost"
+												className="size-6"
 												title="Rename session"
 												onClick={() =>
 													setRenamingSession({
@@ -544,6 +667,14 @@ export default function App() {
 					) : null}
 				</div>
 				<div className="mt-auto space-y-1">
+					<button type="button" className="sidebar-action" onClick={() => setInspector("tree")}>
+						<GitBranch />
+						Session tree
+					</button>
+					<button type="button" className="sidebar-action" onClick={() => setInspector("files")}>
+						<Files />
+						Files
+					</button>
 					<button type="button" className="sidebar-action" onClick={() => setInspector("changes")}>
 						<GitCompareArrows />
 						Changes
@@ -783,15 +914,43 @@ export default function App() {
 					<aside className="col-start-2 row-span-3 row-start-1 min-h-0 border-l bg-card">
 						<div className="flex h-[52px] items-center border-b px-4">
 							<h2 className="text-sm font-medium capitalize">{inspector}</h2>
+							{(inspector === "files" || inspector === "changes") && status === "connected" ? (
+								<Button className="ml-auto mr-2" variant="ghost" size="sm" onClick={() => void refreshReview()}>
+									Refresh
+								</Button>
+							) : null}
 							<Button className="ml-auto" variant="ghost" size="sm" onClick={() => setInspector(undefined)}>
 								Close
 							</Button>
 						</div>
-						<div className="p-4 text-sm leading-6 text-muted-foreground">
-							{inspector === "changes" ? (
-								"Read-only repository changes will appear here as the typed desktop application protocol is expanded."
+						<div className="h-[calc(100%-52px)] text-sm leading-6 text-muted-foreground">
+							{inspector === "tree" ? (
+								<SessionTree
+									tree={session?.tree ?? { nodes: [], leafId: null }}
+									disabled={status !== "connected"}
+									onNavigate={entryId => void runIntent({ type: "tree_navigate", entryId })}
+									onFork={entryId => void runIntent({ type: "tree_fork", entryId })}
+									onLabel={(entryId, label) =>
+										void runIntent({ type: "tree_label", entryId, ...(label ? { label } : {}) })
+									}
+								/>
+							) : inspector === "files" || inspector === "changes" ? (
+								review ? (
+									inspector === "files" ? (
+										<FilesInspector review={review} projectPath={project ?? ""} onOpen={openPath} />
+									) : (
+										<ChangesInspector review={review} projectPath={project ?? ""} onOpen={openPath} />
+									)
+								) : (
+									<div className="grid h-full place-items-center">
+										<div className="flex items-center gap-2 text-xs">
+											{reviewLoading ? <LoaderCircle className="animate-spin" /> : null}
+											{reviewLoading ? "Reading workspace…" : "Workspace review unavailable"}
+										</div>
+									</div>
+								)
 							) : inspector === "diagnostics" ? (
-								<dl className="space-y-3">
+								<dl className="space-y-3 p-4">
 									<div>
 										<dt className="text-xs">Connection</dt>
 										<dd className="text-foreground">{status}</dd>
@@ -806,7 +965,9 @@ export default function App() {
 									</div>
 								</dl>
 							) : (
-								"This native workflow is part of the accepted Desktop Parity matrix."
+								<p className="p-4 text-xs">
+									This native workflow is part of the accepted Desktop Parity matrix.
+								</p>
 							)}
 						</div>
 					</aside>

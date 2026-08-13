@@ -113,6 +113,44 @@ input {
 	height: 0.9rem;
 }
 
+.icon-button {
+	display: inline-grid;
+	width: 1.35rem;
+	height: 1.35rem;
+	flex-shrink: 0;
+	place-items: center;
+	border-radius: 0.375rem;
+	color: var(--muted-foreground);
+}
+
+.icon-button:hover {
+	background: var(--accent);
+	color: var(--foreground);
+}
+
+.icon-button:disabled {
+	opacity: 0.45;
+	pointer-events: none;
+}
+
+.icon-button svg {
+	width: 0.8rem;
+	height: 0.8rem;
+}
+
+.status-chip {
+	display: inline-grid;
+	min-width: 0.95rem;
+	height: 0.95rem;
+	padding: 0 0.15rem;
+	place-items: center;
+	border-radius: 0.25rem;
+	background: var(--muted);
+	color: var(--muted-foreground);
+	font-size: 0.62rem;
+	font-weight: 600;
+}
+
 .composer {
 	overflow: hidden;
 	border: 1px solid var(--border);

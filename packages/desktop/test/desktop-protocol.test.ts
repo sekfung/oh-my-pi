@@ -4,6 +4,7 @@ import {
 	readApplicationSnapshot,
 	readMessages,
 	readSessionState,
+	readWorkspaceReview,
 } from "../src/lib/desktop-protocol";
 
 describe("desktop protocol validation", () => {
@@ -37,6 +38,7 @@ describe("desktop protocol validation", () => {
 				items: [{ id: "queue-1", delivery: "steer", text: "Check the tests", images: undefined }],
 				hiddenCount: 1,
 			},
+			tree: { nodes: [], leafId: null },
 		});
 	});
 
@@ -100,5 +102,64 @@ describe("desktop protocol validation", () => {
 			capabilities: ["sessions.list"],
 			sessions: [{ id: "session-1", status: "complete" }],
 		});
+	});
+
+	test("projects session tree nodes with labels and the active leaf", () => {
+		const state = readSessionState({
+			sessionId: "session-1",
+			tree: {
+				leafId: "entry-1",
+				nodes: [
+					{
+						id: "entry-1",
+						parentId: null,
+						type: "message",
+						label: "start",
+						timestamp: "2026-08-13T00:00:00.000Z",
+						preview: "user: hello",
+						ignored: true,
+					},
+				],
+			},
+		});
+
+		expect(state.tree).toEqual({
+			leafId: "entry-1",
+			nodes: [
+				{
+					id: "entry-1",
+					parentId: null,
+					type: "message",
+					label: "start",
+					timestamp: "2026-08-13T00:00:00.000Z",
+					preview: "user: hello",
+				},
+			],
+		});
+	});
+
+	test("validates the read-only workspace review projection", () => {
+		const review = readWorkspaceReview({
+			repository: { root: "/workspace/project", branch: "main" },
+			changes: {
+				summary: { staged: 1, unstaged: 2, untracked: 3 },
+				entries: [{ path: "src/app.ts", staged: true, unstaged: false, untracked: false, diff: "+line" }],
+				truncated: true,
+			},
+			files: [{ path: "src/app.ts", kind: "file" }],
+			filesTruncated: false,
+		});
+
+		expect(review).toEqual({
+			repository: { root: "/workspace/project", branch: "main" },
+			changes: {
+				summary: { staged: 1, unstaged: 2, untracked: 3 },
+				entries: [{ path: "src/app.ts", staged: true, unstaged: false, untracked: false, diff: "+line" }],
+				truncated: true,
+			},
+			files: [{ path: "src/app.ts", kind: "file" }],
+			filesTruncated: false,
+		});
+		expect(() => readWorkspaceReview({ files: [] })).toThrow("invalid workspace review");
 	});
 });

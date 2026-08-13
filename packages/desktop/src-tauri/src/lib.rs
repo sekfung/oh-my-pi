@@ -85,6 +85,42 @@ fn open_external_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn open_path(state: State<'_, SidecarState>, path: String) -> Result<(), String> {
+	let target = PathBuf::from(&path)
+		.canonicalize()
+		.map_err(|error| format!("Unable to open path: {error}"))?;
+	let project = state.project.lock().await;
+	let root = project
+		.as_ref()
+		.ok_or_else(|| "No project is open".to_owned())?
+		.canonicalize()
+		.map_err(|error| format!("Unable to resolve project: {error}"))?;
+	if !is_within(&root, &target) {
+		return Err("Path is outside the active project".to_owned());
+	}
+
+	#[cfg(target_os = "linux")]
+	let mut command = Command::new("xdg-open");
+	#[cfg(target_os = "macos")]
+	let mut command = Command::new("open");
+	#[cfg(target_os = "windows")]
+	let mut command = {
+		let mut command = Command::new("rundll32");
+		command.arg("url.dll,FileProtocolHandler");
+		command
+	};
+	command
+		.arg(&target)
+		.spawn()
+		.map_err(|error| error.to_string())?;
+	Ok(())
+}
+
+fn is_within(root: &Path, target: &Path) -> bool {
+	target.starts_with(root)
+}
+
+#[tauri::command]
 async fn open_project(
 	app: AppHandle,
 	state: State<'_, SidecarState>,
@@ -177,6 +213,7 @@ pub fn run() {
 		.invoke_handler(tauri::generate_handler![
 			startup_project,
 			open_external_url,
+			open_path,
 			open_project,
 			write_sidecar,
 			close_sidecar
@@ -189,7 +226,7 @@ pub fn run() {
 mod tests {
 	use std::path::Path;
 
-	use super::project_argument;
+	use super::{is_within, project_argument};
 
 	#[test]
 	fn resolves_a_relative_project_from_the_launching_instance_cwd() {
@@ -206,5 +243,13 @@ mod tests {
 		let args = vec!["omp-desktop".to_owned(), "--project=/srv/project".to_owned()];
 
 		assert_eq!(project_argument(&args, Path::new("/ignored")), Some("/srv/project".to_owned()));
+	}
+
+	#[test]
+	fn confines_path_opening_to_the_active_project() {
+		assert!(is_within(Path::new("/srv/project"), Path::new("/srv/project/src/app.ts")));
+		assert!(is_within(Path::new("/srv/project"), Path::new("/srv/project")));
+		assert!(!is_within(Path::new("/srv/project"), Path::new("/srv/project-other/app.ts")));
+		assert!(!is_within(Path::new("/srv/project"), Path::new("/etc/passwd")));
 	}
 }

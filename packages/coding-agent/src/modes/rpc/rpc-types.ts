@@ -11,6 +11,7 @@ import type {
 	ApplicationIntentRequest,
 	ApplicationIntentResult,
 	ApplicationSnapshot,
+	WorkspaceReview,
 } from "../../application/application-types";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage, ToolApprovalChoice, ToolApprovalUIRequest } from "../../extensibility/extensions/types";
@@ -46,6 +47,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_application_snapshot" }
 	| ({ id?: string; type: "execute_application_intent" } & ApplicationIntentRequest)
+	| { id?: string; type: "get_workspace_review" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
@@ -233,6 +235,13 @@ export type RpcResponse =
 			command: "execute_application_intent";
 			success: true;
 			data: ApplicationIntentResult;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_workspace_review";
+			success: true;
+			data: WorkspaceReview;
 	  }
 	| {
 			id?: string;

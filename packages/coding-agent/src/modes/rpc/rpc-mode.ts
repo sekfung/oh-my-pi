@@ -19,6 +19,7 @@ import {
 	ApplicationController,
 	ApplicationStaleRevisionError,
 } from "../../application/application-controller";
+import { buildWorkspaceReview } from "../../application/workspace-review";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -1389,6 +1390,10 @@ export async function runRpcMode(
 
 			case "get_messages": {
 				return success(id, "get_messages", { messages: session.messages });
+			}
+
+			case "get_workspace_review": {
+				return success(id, "get_workspace_review", await buildWorkspaceReview(session.sessionManager.getCwd()));
 			}
 
 			case "get_messages_page": {

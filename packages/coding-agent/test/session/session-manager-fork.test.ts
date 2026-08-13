@@ -88,3 +88,61 @@ describe("SessionManager.forkFrom", () => {
 		}
 	});
 });
+
+describe("SessionManager.cloneFrom", () => {
+	it("copies source history into a fresh lineage-free session file", async () => {
+		using tempDir = TempDir.createSync("@omp-session-clone-");
+		const previousAgentDir = getAgentDir();
+		const previousTermSessionId = process.env.TERM_SESSION_ID;
+		setAgentDir(path.join(tempDir.path(), "agent"));
+		process.env.TERM_SESSION_ID = "omp-clone-test";
+		try {
+			const cwd = path.join(tempDir.path(), "project");
+			const sessionDir = path.join(tempDir.path(), "sessions");
+			await fs.mkdir(sessionDir, { recursive: true });
+			const sourceFile = path.join(sessionDir, "source.jsonl");
+			const timestamp = new Date().toISOString();
+			const sourceHeader: SessionHeader = {
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id: "source-session",
+				timestamp,
+				cwd,
+			};
+			const sourceMessage: JsonlMessageEntry = {
+				type: "message",
+				id: "message-1",
+				parentId: null,
+				timestamp,
+				message: { role: "user", content: "hello", timestamp: Date.now() },
+			};
+			await Bun.write(sourceFile, `${JSON.stringify(sourceHeader)}\n${JSON.stringify(sourceMessage)}\n`);
+
+			const cloned = await SessionManager.cloneFrom(sourceFile, cwd, sessionDir, undefined, {
+				suppressBreadcrumb: true,
+			});
+			const cloneFile = cloned.getSessionFile();
+			expect(cloneFile).toBeString();
+			if (!cloneFile) throw new Error("expected cloned session file");
+
+			expect(cloneFile).not.toBe(sourceFile);
+			expect(await Bun.file(sourceFile).text()).toContain("source-session");
+
+			const cloneEntries = await loadEntriesFromFile(cloneFile);
+			const cloneHeader = cloneEntries.find((entry): entry is SessionHeader => entry.type === "session");
+			const cloneMessage = cloneEntries.find((entry): entry is SessionMessageEntry => entry.type === "message");
+			expect(cloneHeader?.id).not.toBe(sourceHeader.id);
+			expect(cloneHeader?.parentSession).toBeUndefined();
+			expect(cloneHeader?.cwd).toBe(cwd);
+			if (cloneMessage?.message.role !== "user") throw new Error("expected cloned user message");
+			expect(cloneMessage.message.content).toBe("hello");
+		} finally {
+			if (previousTermSessionId === undefined) {
+				delete process.env.TERM_SESSION_ID;
+			} else {
+				process.env.TERM_SESSION_ID = previousTermSessionId;
+			}
+			setAgentDir(previousAgentDir);
+		}
+	});
+});
