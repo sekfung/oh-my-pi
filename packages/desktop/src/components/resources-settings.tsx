@@ -2,9 +2,10 @@ import { AlertTriangle, Blocks, Bot, LoaderCircle, Plug, RefreshCw, Sparkles, Wr
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { DesktopResourcesSnapshot } from "@/lib/desktop-protocol";
+import { useT } from "@/lib/i18n/context";
 import { cn } from "@/lib/utils";
 
-export interface ResourcesInspectorProps {
+export interface ResourcesSettingsProps {
 	resources?: DesktopResourcesSnapshot;
 	loading: boolean;
 	onReload(): void;
@@ -33,17 +34,17 @@ function Section({
 				{title}
 				<span className="text-muted-foreground">({count})</span>
 			</button>
-			{open ? <div className="mt-1.5 space-y-1">{children}</div> : null}
+			{open ? <div className="mt-1.5 space-y-1.5">{children}</div> : null}
 		</section>
 	);
 }
 
 function Row({ title, subtitle, badge }: { title: string; subtitle?: string; badge?: string }) {
 	return (
-		<div className="flex items-center gap-2 rounded-lg border bg-card px-2 py-1.5">
+		<div className="flex items-center gap-2 rounded-lg border bg-card px-2.5 py-2">
 			<div className="min-w-0 flex-1">
 				<p className="truncate text-xs font-medium">{title}</p>
-				{subtitle ? <p className="truncate text-[10px] text-muted-foreground">{subtitle}</p> : null}
+				{subtitle ? <p className="truncate text-[11px] text-muted-foreground">{subtitle}</p> : null}
 			</div>
 			{badge ? (
 				<span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{badge}</span>
@@ -52,14 +53,18 @@ function Row({ title, subtitle, badge }: { title: string; subtitle?: string; bad
 	);
 }
 
-export function ResourcesInspector({ resources, loading, onReload }: ResourcesInspectorProps) {
+/**
+ * Skills, plugins, MCP servers, agents, tools, and prompts come from project and
+ * global configuration — the active session only consumes them.
+ */
+export function ResourcesSettings({ resources, loading, onReload }: ResourcesSettingsProps) {
+	const t = useT();
+
 	if (loading && !resources) {
 		return (
-			<div className="grid h-full place-items-center">
-				<div className="flex items-center gap-2 text-xs">
-					<LoaderCircle className="animate-spin" />
-					Reading resources…
-				</div>
+			<div className="flex items-center gap-2 text-xs text-muted-foreground">
+				<LoaderCircle className="size-3 animate-spin" />
+				{t("resources.loading")}
 			</div>
 		);
 	}
@@ -69,10 +74,10 @@ export function ResourcesInspector({ resources, loading, onReload }: ResourcesIn
 	const warnings = [...resources.skillWarnings, ...resources.promptWarnings];
 
 	return (
-		<div className="space-y-4 p-3">
-			<Button size="sm" variant="outline" className="h-7 w-full gap-1.5 text-[11px]" onClick={onReload}>
+		<>
+			<Button size="sm" variant="outline" className="h-7 gap-1.5 text-[11px]" onClick={onReload}>
 				<RefreshCw className={cn("size-3", loading && "animate-spin")} />
-				Reload skills, plugins, and commands
+				{t("resources.reload")}
 			</Button>
 
 			{warnings.length > 0 ? (
@@ -86,51 +91,53 @@ export function ResourcesInspector({ resources, loading, onReload }: ResourcesIn
 				</div>
 			) : null}
 
-			<Section icon={Sparkles} title="Skills" count={resources.skills.length}>
+			<Section icon={Sparkles} title={t("resources.skills")} count={resources.skills.length}>
 				{resources.skills.map(skill => (
 					<Row key={skill.name} title={skill.name} subtitle={skill.description} badge={skill.source} />
 				))}
 			</Section>
 
-			<Section icon={Blocks} title="Plugins" count={resources.plugins.length}>
+			<Section icon={Blocks} title={t("resources.plugins")} count={resources.plugins.length}>
 				{resources.plugins.map(plugin => (
 					<Row
 						key={plugin.name}
 						title={plugin.name}
 						subtitle={`v${plugin.version}`}
-						badge={plugin.enabled ? "enabled" : "disabled"}
+						badge={plugin.enabled ? t("resources.enabled") : t("resources.disabled")}
 					/>
 				))}
 			</Section>
 
-			<Section icon={Plug} title="MCP servers" count={resources.mcpServers.length}>
+			<Section icon={Plug} title={t("resources.mcpServers")} count={resources.mcpServers.length}>
 				{resources.mcpServers.map(server => (
 					<Row
 						key={server.name}
 						title={server.name}
-						subtitle={server.toolCount !== undefined ? `${server.toolCount} tools` : undefined}
+						subtitle={
+							server.toolCount !== undefined ? `${server.toolCount} ${t("resources.toolsUnit")}` : undefined
+						}
 						badge={server.status}
 					/>
 				))}
 			</Section>
 
-			<Section icon={Bot} title="Agents" count={resources.agents.length}>
+			<Section icon={Bot} title={t("resources.agents")} count={resources.agents.length}>
 				{resources.agents.map(agent => (
 					<Row key={agent.name} title={agent.name} subtitle={agent.description} badge={agent.source} />
 				))}
 			</Section>
 
-			<Section icon={Wrench} title="Tools" count={resources.tools.length}>
+			<Section icon={Wrench} title={t("resources.tools")} count={resources.tools.length}>
 				{resources.tools.map(tool => (
 					<Row key={tool.name} title={tool.name} subtitle={tool.description} />
 				))}
 			</Section>
 
-			<Section icon={Sparkles} title="Prompts" count={resources.prompts.length}>
+			<Section icon={Sparkles} title={t("resources.prompts")} count={resources.prompts.length}>
 				{resources.prompts.map(prompt => (
 					<Row key={prompt.path} title={prompt.name} subtitle={prompt.providerName} badge={prompt.sourceLevel} />
 				))}
 			</Section>
-		</div>
+		</>
 	);
 }

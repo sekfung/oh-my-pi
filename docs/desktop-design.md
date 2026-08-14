@@ -26,6 +26,8 @@ React/shadcn presentation
 
 Rust owns only native window integration, constrained dialogs and links, and Desktop Sidecar lifecycle. Application Behavior stays in the sidecar. The initial transport uses framed stdio; presentation state is not coupled to Tauri process APIs. A future local-socket adapter is possible, but neither a shared daemon nor multiple windows are part of this design.
 
+> The framed-stdio transport and single-window/no-daemon topology described here are being revisited; see `docs/desktop-performance-optimization.md` for the identified costs, phased protocol/transport/daemon plan, and which parts of this section and `docs/adr/0002-single-window-local-sidecar-topology.md` it supersedes.
+
 The application protocol must grow beyond today's command-response RPC into an authoritative application projection:
 
 - connection snapshots contain the active project, session, transcript, queues, operations, model and thinking state, settings, capabilities, pending interactions, and diagnostics;
@@ -39,6 +41,7 @@ The application protocol must grow beyond today's command-response RPC into an a
 - The left sidebar contains the Active Project, recent projects, and current-project sessions.
 - The center contains a virtualized transcript and persistent composer.
 - The right inspector opens on demand for Changes, Files, Tasks, and Diagnostics.
+- The inspector is reserved for surfaces bound to the active session; configuration that outlives the session — approval policies, installed resources, appearance, and every schema setting — lives on the settings page.
 - The command palette contains built-in commands, extension commands, and available operations.
 - Files and Changes are review surfaces. Editing is performed by agent tools or an external editor.
 - Shell actions render as structured command cards with streaming output, approval, exit status, and abort; there is no general PTY terminal.

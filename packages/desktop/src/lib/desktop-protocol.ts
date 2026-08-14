@@ -73,7 +73,10 @@ export type DesktopRpcCommand =
 	| { type: "collab_stop" }
 	| { type: "get_collab_state" }
 	| { type: "collab_join"; link: string }
-	| { type: "collab_leave" };
+	| { type: "collab_leave" }
+	| { type: "get_provider_credentials" }
+	| { type: "set_provider_api_key"; providerId: string; apiKey: string }
+	| { type: "clear_provider_api_key"; providerId: string };
 
 export interface DesktopRpcSuccess {
 	id?: string;
@@ -291,6 +294,30 @@ export function readAvailableModels(value: unknown): DesktopAvailableModel[] {
 		throw new Error("Sidecar returned invalid available models");
 	}
 	return value.models.map(readAvailableModel);
+}
+
+export interface DesktopProviderCredential {
+	id: string;
+	label: string;
+	configured: boolean;
+}
+
+function readProviderCredential(value: unknown): DesktopProviderCredential {
+	if (!isRecord(value) || typeof value.id !== "string") {
+		throw new Error("Sidecar returned an invalid provider credential entry");
+	}
+	return {
+		id: value.id,
+		label: typeof value.label === "string" ? value.label : value.id,
+		configured: value.configured === true,
+	};
+}
+
+export function readProviderCredentials(value: unknown): DesktopProviderCredential[] {
+	if (!isRecord(value) || !Array.isArray(value.providers)) {
+		throw new Error("Sidecar returned invalid provider credentials");
+	}
+	return value.providers.map(readProviderCredential);
 }
 
 export interface DesktopApprovalPolicies {

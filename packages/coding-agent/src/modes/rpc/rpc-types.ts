@@ -141,6 +141,11 @@ export type RpcCommand =
 	| { id?: string; type: "get_login_providers" }
 	| { id?: string; type: "login"; providerId: string }
 
+	// Provider API keys (BYO-key credential entry, distinct from OAuth login above)
+	| { id?: string; type: "get_provider_credentials" }
+	| { id?: string; type: "set_provider_api_key"; providerId: string; apiKey: string }
+	| { id?: string; type: "clear_provider_api_key"; providerId: string }
+
 	// Release updates (check-only; no signed auto-updater yet)
 	| { id?: string; type: "get_update_status" }
 
@@ -639,6 +644,17 @@ export type RpcResponse =
 			data: { providers: Array<{ id: string; name: string; available: boolean; authenticated: boolean }> };
 	  }
 	| { id?: string; type: "response"; command: "login"; success: true; data: { providerId: string } }
+
+	// Provider API keys
+	| {
+			id?: string;
+			type: "response";
+			command: "get_provider_credentials";
+			success: true;
+			data: { providers: Array<{ id: string; label: string; configured: boolean }> };
+	  }
+	| { id?: string; type: "response"; command: "set_provider_api_key"; success: true }
+	| { id?: string; type: "response"; command: "clear_provider_api_key"; success: true }
 
 	// Release updates
 	| { id?: string; type: "response"; command: "get_update_status"; success: true; data: RpcUpdateStatus }

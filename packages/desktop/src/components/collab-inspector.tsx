@@ -40,8 +40,6 @@ export interface CollabInspectorProps {
 	collab?: DesktopCollabState;
 	guest?: DesktopCollabGuestState;
 	loading: boolean;
-	relayUrl: string;
-	onRelayUrlChange(value: string): void;
 	onStart(): void;
 	onStop(): void;
 	onOpenLink(url: string): void;
@@ -55,8 +53,6 @@ export function CollabInspector({
 	collab,
 	guest,
 	loading,
-	relayUrl,
-	onRelayUrlChange,
 	onStart,
 	onStop,
 	onOpenLink,
@@ -101,12 +97,9 @@ export function CollabInspector({
 					</div>
 				) : (
 					<div className="mt-2 space-y-2">
-						<input
-							value={relayUrl}
-							onChange={event => onRelayUrlChange(event.target.value)}
-							placeholder="relay.example.com (optional — uses collab.relayUrl)"
-							className="h-7 w-full rounded-md border bg-background px-2 text-[11px] outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
-						/>
+						<p className="text-[11px] text-muted-foreground">
+							The relay and display name come from Settings → Interaction → Collab.
+						</p>
 						<Button
 							size="sm"
 							variant="outline"

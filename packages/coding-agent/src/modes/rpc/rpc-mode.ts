@@ -13,6 +13,7 @@
 import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { CATALOG_PROVIDERS, type ProviderCatalogEntry } from "@oh-my-pi/pi-catalog";
 import { $env, compareVersions, isRecord, logger, readLines, Snowflake, VERSION } from "@oh-my-pi/pi-utils";
 import {
 	AgentSessionApplicationRuntime,
@@ -1951,6 +1952,36 @@ export async function runRpcMode(
 				} catch (err: unknown) {
 					return error(id, "login", err instanceof Error ? err.message : String(err));
 				}
+			}
+
+			// =================================================================
+			// Provider API keys (BYO-key credential entry, distinct from OAuth login above)
+			// =================================================================
+
+			case "get_provider_credentials": {
+				const catalogProviders: readonly ProviderCatalogEntry[] = CATALOG_PROVIDERS;
+				const providers = catalogProviders
+					.filter(provider => provider.createModelManagerOptions && !provider.specialModelManager)
+					.map(provider => ({
+						id: provider.id,
+						label: provider.catalogDiscovery?.label ?? provider.id,
+						configured: session.modelRegistry.authStorage.hasAuth(provider.id),
+					}));
+				return success(id, "get_provider_credentials", { providers });
+			}
+
+			case "set_provider_api_key": {
+				session.modelRegistry.authStorage.upsertCredential(command.providerId, {
+					type: "api_key",
+					key: command.apiKey,
+				});
+				await session.modelRegistry.refreshProvider(command.providerId, "online");
+				return success(id, "set_provider_api_key");
+			}
+
+			case "clear_provider_api_key": {
+				await session.modelRegistry.authStorage.logout(command.providerId);
+				return success(id, "clear_provider_api_key");
 			}
 
 			// =================================================================

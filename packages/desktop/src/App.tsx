@@ -25,6 +25,7 @@ import {
 	Pencil,
 	Plus,
 	Radio,
+	RefreshCw,
 	RotateCcw,
 	Send,
 	Settings2,
@@ -40,16 +41,14 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import appIcon from "@/assets/app-icon-ui.png";
-import { ApprovalsInspector } from "@/components/approvals-inspector";
 import { CollabInspector } from "@/components/collab-inspector";
 import { CommandPalette, type PaletteAction } from "@/components/command-palette";
 import { ComposerSuggestions } from "@/components/composer-suggestions";
 import { ContextInspector } from "@/components/context-inspector";
 import { HostInteraction } from "@/components/host-interaction";
 import { ModelPicker } from "@/components/model-picker";
-import { ResourcesInspector } from "@/components/resources-inspector";
 import { SessionTree } from "@/components/session-tree";
-import { SettingsInspector } from "@/components/settings-inspector";
+import { SettingsPage, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP } from "@/components/settings-page";
 import { ThinkingMenu } from "@/components/thinking-menu";
 import { Transcript } from "@/components/transcript";
 import { Button } from "@/components/ui/button";
@@ -66,6 +65,7 @@ import {
 	type DesktopContextState,
 	type DesktopHostInteraction,
 	type DesktopImageContent,
+	type DesktopProviderCredential,
 	type DesktopQueuedMessage,
 	type DesktopResourcesSnapshot,
 	type DesktopSessionState,
@@ -90,6 +90,7 @@ import {
 	readContextState,
 	readGoalUpdatedFrame,
 	readMessages,
+	readProviderCredentials,
 	readResourcesSnapshot,
 	readSessionStats,
 	readSettingsSchema,
@@ -102,27 +103,19 @@ import {
 } from "@/lib/desktop-protocol";
 import type { DesktopRpcCommand } from "@/lib/desktop-transport";
 import { TauriSidecarTransport } from "@/lib/desktop-transport";
+import { useT } from "@/lib/i18n/context";
+import type { MessageKey } from "@/lib/i18n/messages";
 import { cn } from "@/lib/utils";
 
 const RECENT_PROJECTS_KEY = "omp.desktop.recent-projects";
 const APPEARANCE_KEY = "omp.desktop.appearance";
+const APP_THEME_KEY = "omp.desktop.theme";
 const ZOOM_KEY = "omp.desktop.zoom";
-const ZOOM_MIN = 0.8;
-const ZOOM_MAX = 1.6;
-const ZOOM_STEP = 0.1;
 
 type ConnectionStatus = "empty" | "connecting" | "connected" | "recovering" | "disconnected";
-type Inspector =
-	| "tree"
-	| "files"
-	| "changes"
-	| "approvals"
-	| "context"
-	| "workflows"
-	| "collab"
-	| "settings"
-	| "resources"
-	| "diagnostics";
+/** Session-scoped surfaces. Configuration that outlives the session lives on the settings page. */
+type Inspector = "tree" | "files" | "changes" | "context" | "workflows" | "collab" | "diagnostics";
+type FullPageView = "settings";
 
 interface ShellRunState {
 	id: string;
@@ -171,6 +164,7 @@ async function imageContent(file: File): Promise<DesktopImageContent> {
 }
 
 export default function App() {
+	const t = useT();
 	const transport = useMemo(() => new TauriSidecarTransport(), []);
 	const fileInput = useRef<HTMLInputElement>(null);
 	const projectRef = useRef<string | undefined>(undefined);
@@ -200,11 +194,12 @@ export default function App() {
 	const [collabState, setCollabState] = useState<DesktopCollabState>();
 	const [collabGuestState, setCollabGuestState] = useState<DesktopCollabGuestState>();
 	const [collabLoading, setCollabLoading] = useState(false);
-	const [collabRelayUrl, setCollabRelayUrl] = useState("");
 	const [collabJoinLink, setCollabJoinLink] = useState("");
 	const [settingsSchema, setSettingsSchema] = useState<DesktopSettingsSchema>();
 	const [settingValues, setSettingValues] = useState<DesktopSettingValueEntry[]>();
 	const [settingsLoading, setSettingsLoading] = useState(false);
+	const [providerCredentials, setProviderCredentials] = useState<DesktopProviderCredential[]>();
+	const [providerCredentialsLoading, setProviderCredentialsLoading] = useState(false);
 	const [resources, setResources] = useState<DesktopResourcesSnapshot>();
 	const [resourcesLoading, setResourcesLoading] = useState(false);
 	const [approvalsLoading, setApprovalsLoading] = useState(false);
@@ -233,6 +228,8 @@ export default function App() {
 	const [error, setError] = useState<string>();
 	const [notice, setNotice] = useState<string>();
 	const [inspector, setInspector] = useState<Inspector>();
+	const [fullPage, setFullPage] = useState<FullPageView>();
+	const [settingsTab, setSettingsTab] = useState<string>();
 	const [renamingSession, setRenamingSession] = useState<{ path: string; title: string }>();
 	const [deletingSessionPath, setDeletingSessionPath] = useState<string>();
 	const [importingSource, setImportingSource] = useState<"claude" | "codex">();
@@ -242,6 +239,7 @@ export default function App() {
 	});
 	const [systemDark, setSystemDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
 	const dark = appearance === "dark" || (appearance === "system" && systemDark);
+	const [appTheme, setAppTheme] = useState<string | undefined>(() => localStorage.getItem(APP_THEME_KEY) ?? undefined);
 	const [zoom, setZoom] = useState(() => {
 		const saved = Number.parseFloat(localStorage.getItem(ZOOM_KEY) ?? "");
 		return Number.isFinite(saved) && saved >= ZOOM_MIN && saved <= ZOOM_MAX ? saved : 1;
@@ -390,10 +388,8 @@ export default function App() {
 
 	const startCollab = async () => {
 		try {
-			const response = await transport.request({
-				type: "collab_start",
-				relayUrl: collabRelayUrl.trim() || undefined,
-			});
+			// The relay comes from `collab.relayUrl` in settings; hosting itself is session state.
+			const response = await transport.request({ type: "collab_start" });
 			if (!response.success) throw new Error(response.error);
 			if (response.command === "collab_start") setCollabState(readCollabState(response.data));
 		} catch (cause) {
@@ -465,6 +461,39 @@ export default function App() {
 			setSettingsLoading(false);
 		}
 	}, [transport, settingsSchema]);
+
+	const refreshProviderCredentials = useCallback(async () => {
+		setProviderCredentialsLoading(true);
+		try {
+			const response = await transport.request({ type: "get_provider_credentials" });
+			if (!response.success) throw new Error(response.error);
+			setProviderCredentials(readProviderCredentials(response.data));
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		} finally {
+			setProviderCredentialsLoading(false);
+		}
+	}, [transport]);
+
+	const setProviderApiKey = async (providerId: string, apiKey: string) => {
+		try {
+			const response = await transport.request({ type: "set_provider_api_key", providerId, apiKey });
+			if (!response.success) throw new Error(response.error);
+			await refreshProviderCredentials();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
+
+	const clearProviderApiKey = async (providerId: string) => {
+		try {
+			const response = await transport.request({ type: "clear_provider_api_key", providerId });
+			if (!response.success) throw new Error(response.error);
+			await refreshProviderCredentials();
+		} catch (cause) {
+			setError(cause instanceof Error ? cause.message : String(cause));
+		}
+	};
 
 	const refreshResources = useCallback(async () => {
 		setResourcesLoading(true);
@@ -586,6 +615,11 @@ export default function App() {
 	}, [dark]);
 
 	useEffect(() => {
+		if (appTheme) document.documentElement.setAttribute("data-app-theme", appTheme);
+		else document.documentElement.removeAttribute("data-app-theme");
+	}, [appTheme]);
+
+	useEffect(() => {
 		const query = window.matchMedia("(prefers-color-scheme: dark)");
 		const changed = () => setSystemDark(query.matches);
 		query.addEventListener("change", changed);
@@ -595,6 +629,17 @@ export default function App() {
 	useEffect(() => {
 		document.documentElement.style.fontSize = zoom === 1 ? "" : `${zoom * 100}%`;
 	}, [zoom]);
+
+	/** Single writer for zoom, shared by the shortcuts and the settings slider. */
+	const applyZoom = useCallback((value: number | ((current: number) => number)) => {
+		setZoom(current => {
+			const requested = typeof value === "function" ? value(current) : value;
+			const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(requested * 100) / 100));
+			if (next === 1) localStorage.removeItem(ZOOM_KEY);
+			else localStorage.setItem(ZOOM_KEY, String(next));
+			return next;
+		});
+	}, []);
 
 	useEffect(() => {
 		const onKeyDown = (event: KeyboardEvent) => {
@@ -606,35 +651,22 @@ export default function App() {
 			if (!(event.metaKey || event.ctrlKey)) return;
 			if (event.key === "=" || event.key === "+") {
 				event.preventDefault();
-				setZoom(current => {
-					const next = Math.min(ZOOM_MAX, Math.round((current + ZOOM_STEP) * 100) / 100);
-					localStorage.setItem(ZOOM_KEY, String(next));
-					return next;
-				});
+				applyZoom(current => current + ZOOM_STEP);
 			} else if (event.key === "-") {
 				event.preventDefault();
-				setZoom(current => {
-					const next = Math.max(ZOOM_MIN, Math.round((current - ZOOM_STEP) * 100) / 100);
-					localStorage.setItem(ZOOM_KEY, String(next));
-					return next;
-				});
+				applyZoom(current => current - ZOOM_STEP);
 			} else if (event.key === "0") {
 				event.preventDefault();
-				setZoom(1);
-				localStorage.removeItem(ZOOM_KEY);
+				applyZoom(1);
 			}
 		};
 		window.addEventListener("keydown", onKeyDown);
 		return () => window.removeEventListener("keydown", onKeyDown);
-	}, []);
+	}, [applyZoom]);
 
 	useEffect(() => {
 		if ((inspector === "files" || inspector === "changes") && status === "connected") void refreshReview();
 	}, [inspector, status, refreshReview]);
-
-	useEffect(() => {
-		if (inspector === "approvals" && status === "connected") void refreshApprovals();
-	}, [inspector, status, refreshApprovals]);
 
 	useEffect(() => {
 		if (inspector === "context" && status === "connected") void refreshContext();
@@ -658,12 +690,19 @@ export default function App() {
 	}, [inspector, status, refreshWorkflows, transport]);
 
 	useEffect(() => {
-		if (inspector === "settings" && status === "connected") void refreshSettings();
-	}, [inspector, status, refreshSettings]);
+		if (fullPage === "settings" && status === "connected") {
+			void refreshSettings();
+			void refreshProviderCredentials();
+		}
+	}, [fullPage, status, refreshSettings, refreshProviderCredentials]);
 
 	useEffect(() => {
-		if (inspector === "resources" && status === "connected") void refreshResources();
-	}, [inspector, status, refreshResources]);
+		if (fullPage === "settings" && settingsTab === "approvals" && status === "connected") void refreshApprovals();
+	}, [fullPage, settingsTab, status, refreshApprovals]);
+
+	useEffect(() => {
+		if (fullPage === "settings" && settingsTab === "resources" && status === "connected") void refreshResources();
+	}, [fullPage, settingsTab, status, refreshResources]);
 
 	useEffect(() => {
 		let stopOpenProject: (() => void) | undefined;
@@ -1064,11 +1103,38 @@ export default function App() {
 		}
 	};
 
-	const cycleAppearance = () => {
-		const next = appearance === "system" ? "light" : appearance === "light" ? "dark" : "system";
+	const selectAppearance = (next: "system" | "light" | "dark") => {
 		setAppearance(next);
 		localStorage.setItem(APPEARANCE_KEY, next);
 	};
+
+	const cycleAppearance = () =>
+		selectAppearance(appearance === "system" ? "light" : appearance === "light" ? "dark" : "system");
+
+	/** Configuration lives on the settings page; `tabId` deep-links the palette to a section. */
+	const openSettings = (tabId?: string) => {
+		setSettingsTab(tabId);
+		setFullPage("settings");
+	};
+
+	const selectAppTheme = (themeId?: string) => {
+		setAppTheme(themeId);
+		if (themeId) localStorage.setItem(APP_THEME_KEY, themeId);
+		else localStorage.removeItem(APP_THEME_KEY);
+	};
+
+	/** Refresh action for the open inspector — the session tree needs none. */
+	const refreshInspector = useMemo(() => {
+		const actions: Partial<Record<Inspector, () => void>> = {
+			files: () => void refreshReview(),
+			changes: () => void refreshReview(),
+			context: () => void refreshContext(),
+			workflows: () => void refreshWorkflows(),
+			collab: () => void refreshCollabState(),
+			diagnostics: () => void refreshSessionStats(),
+		};
+		return inspector ? actions[inspector] : undefined;
+	}, [inspector, refreshReview, refreshContext, refreshWorkflows, refreshCollabState, refreshSessionStats]);
 
 	const paletteActions = useMemo((): PaletteAction[] => {
 		const commandActions: PaletteAction[] = slashCommands.map(command => ({
@@ -1123,11 +1189,27 @@ export default function App() {
 				run: () => setInspector("changes"),
 			},
 			{
+				id: "op:settings",
+				label: "Open Settings",
+				icon: Settings2,
+				group: "Operations",
+				run: () => openSettings(),
+			},
+			{
 				id: "op:approvals",
 				label: "Open Approvals",
+				hint: "Settings",
 				icon: ShieldCheck,
 				group: "Operations",
-				run: () => setInspector("approvals"),
+				run: () => openSettings("approvals"),
+			},
+			{
+				id: "op:resources",
+				label: "Open Resources",
+				hint: "Settings",
+				icon: Blocks,
+				group: "Operations",
+				run: () => openSettings("resources"),
 			},
 			{
 				id: "op:workflows",
@@ -1184,7 +1266,7 @@ export default function App() {
 			<main className="grid h-full place-items-center bg-background p-8">
 				<section className="w-full max-w-lg">
 					<img src={appIcon} alt="" className="mb-8 size-12 rounded-2xl shadow-sm" />
-					<h1 className="text-3xl font-semibold tracking-tight">Open a project</h1>
+					<h1 className="text-3xl font-semibold tracking-tight">{t("workspace.openProject")}</h1>
 					<p className="mt-2 text-sm leading-6 text-muted-foreground">
 						Oh My Pi works in your local project and uses the same sessions, settings, credentials, skills, and
 						tools as the terminal.
@@ -1195,7 +1277,7 @@ export default function App() {
 					</Button>
 					{recentProjects.length > 0 ? (
 						<div className="mt-8 space-y-1">
-							<p className="mb-2 text-xs font-medium text-muted-foreground">Recent projects</p>
+							<p className="mb-2 text-xs font-medium text-muted-foreground">{t("workspace.recentProjects")}</p>
 							{recentProjects.map(path => (
 								<button
 									type="button"
@@ -1220,8 +1302,57 @@ export default function App() {
 		);
 	}
 
+	if (fullPage === "settings") {
+		return (
+			<SettingsPage
+				schema={settingsSchema}
+				values={settingValues}
+				loading={settingsLoading}
+				onSet={(settingPath, scope, value) => void setSettingValue(settingPath, scope, value)}
+				onReset={(settingPath, scope) => void resetSettingValue(settingPath, scope)}
+				onRefresh={() => void refreshSettings()}
+				onBack={() => setFullPage(undefined)}
+				tab={settingsTab}
+				onTabChange={setSettingsTab}
+				appearance={{
+					mode: appearance,
+					onModeChange: selectAppearance,
+					dark,
+					theme: appTheme,
+					onThemeChange: selectAppTheme,
+					zoom,
+					onZoomChange: applyZoom,
+				}}
+				providers={{
+					credentials: providerCredentials,
+					loading: providerCredentialsLoading,
+					onSetApiKey: (providerId, apiKey) => void setProviderApiKey(providerId, apiKey),
+					onClearApiKey: providerId => void clearProviderApiKey(providerId),
+				}}
+				approvals={{
+					policies: approvalPolicies,
+					loading: approvalsLoading,
+					onRefresh: () => void refreshApprovals(),
+					onPromote: policyKey => void promoteApprovalPolicy(policyKey),
+					onClear: (scope, policyKey) => void clearApprovalPolicy(scope, policyKey),
+				}}
+				resources={{
+					snapshot: resources,
+					loading: resourcesLoading,
+					onRefresh: () => void refreshResources(),
+					onReload: () => void reloadResources(),
+				}}
+			/>
+		);
+	}
+
 	return (
-		<div className="grid h-full grid-cols-[248px_minmax(0,1fr)] bg-background text-foreground">
+		// The single row is explicit: an implicit `auto` row only ever stretches, so a
+		// tall transcript would grow the row past the window, leave the transcript with
+		// nothing to scroll (scrollHeight === clientHeight), and push the composer out
+		// of the window. `min-h-0` does the same for the column, whose automatic
+		// minimum size would otherwise refuse to shrink below its content.
+		<div className="grid h-full grid-cols-[248px_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] overflow-hidden bg-background text-foreground">
 			<aside className="flex min-h-0 flex-col border-r bg-sidebar p-2">
 				<div className="flex items-center gap-2 px-2 py-2">
 					<img src={appIcon} alt="" className="size-7 rounded-lg" />
@@ -1239,14 +1370,14 @@ export default function App() {
 					<ChevronDown className="size-3.5 text-muted-foreground" />
 				</button>
 				<div className="mt-5 flex items-center justify-between px-2">
-					<span className="text-xs font-medium text-muted-foreground">Sessions</span>
+					<span className="text-xs font-medium text-muted-foreground">{t("workspace.sessions")}</span>
 					<span className="flex items-center gap-0.5">
 						<Button
 							size="icon"
 							variant="ghost"
 							className="size-6"
-							title="Import a Claude or Codex transcript"
-							aria-label="Import a Claude or Codex transcript"
+							title={t("workspace.importTranscript")}
+							aria-label={t("workspace.importTranscript")}
 							onClick={() => setImportingSource(value => (value ? undefined : "claude"))}
 						>
 							<Upload />
@@ -1255,8 +1386,8 @@ export default function App() {
 							size="icon"
 							variant="ghost"
 							className="size-6"
-							title="New session"
-							aria-label="New session"
+							title={t("workspace.newSession")}
+							aria-label={t("workspace.newSession")}
 							onClick={() => runIntent({ type: "new_session" })}
 						>
 							<Plus />
@@ -1290,7 +1421,7 @@ export default function App() {
 					<input
 						value={sessionSearch}
 						onChange={event => setSessionSearch(event.target.value)}
-						placeholder="Search sessions…"
+						placeholder={t("workspace.searchSessions")}
 						className="mt-1 h-7 w-full rounded-md border bg-background px-2 text-xs outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
 					/>
 				) : null}
@@ -1321,7 +1452,7 @@ export default function App() {
 											size="icon"
 											variant="ghost"
 											className="size-6"
-											aria-label="Save session name"
+											aria-label={t("workspace.saveSessionName")}
 											onClick={renameSession}
 										>
 											<Check />
@@ -1330,7 +1461,7 @@ export default function App() {
 											size="icon"
 											variant="ghost"
 											className="size-6"
-											aria-label="Cancel rename"
+											aria-label={t("workspace.cancelRename")}
 											onClick={() => setRenamingSession(undefined)}
 										>
 											<X />
@@ -1384,8 +1515,8 @@ export default function App() {
 												size="icon"
 												variant="ghost"
 												className="size-6"
-												title="Clone session"
-												aria-label="Clone session"
+												title={t("workspace.cloneSession")}
+												aria-label={t("workspace.cloneSession")}
 												onClick={() => runIntent({ type: "clone_session", sessionPath: item.path })}
 											>
 												<CopyPlus />
@@ -1394,8 +1525,8 @@ export default function App() {
 												size="icon"
 												variant="ghost"
 												className="size-6"
-												title="Fork session"
-												aria-label="Fork session"
+												title={t("workspace.forkSession")}
+												aria-label={t("workspace.forkSession")}
 												onClick={() => runIntent({ type: "fork_session", sessionPath: item.path })}
 											>
 												<GitFork />
@@ -1404,8 +1535,8 @@ export default function App() {
 												size="icon"
 												variant="ghost"
 												className="size-6"
-												title="Export session"
-												aria-label="Export session"
+												title={t("workspace.exportSession")}
+												aria-label={t("workspace.exportSession")}
 												onClick={() => void exportSession(item)}
 											>
 												<Download />
@@ -1414,8 +1545,8 @@ export default function App() {
 												size="icon"
 												variant="ghost"
 												className="size-6"
-												title="Rename session"
-												aria-label="Rename session"
+												title={t("workspace.renameSession")}
+												aria-label={t("workspace.renameSession")}
 												onClick={() =>
 													setRenamingSession({
 														path: item.path,
@@ -1455,50 +1586,46 @@ export default function App() {
 				<div className="mt-auto space-y-1">
 					<button type="button" className="sidebar-action" onClick={() => setInspector("tree")}>
 						<GitBranch />
-						Session tree
+						{t("nav.tree")}
 					</button>
 					<button type="button" className="sidebar-action" onClick={() => setInspector("files")}>
 						<Files />
-						Files
+						{t("nav.files")}
 					</button>
 					<button type="button" className="sidebar-action" onClick={() => setInspector("changes")}>
 						<GitCompareArrows />
-						Changes
-					</button>
-					<button type="button" className="sidebar-action" onClick={() => setInspector("approvals")}>
-						<ShieldCheck />
-						Approvals
+						{t("nav.changes")}
 					</button>
 					<button type="button" className="sidebar-action" onClick={() => setInspector("context")}>
 						<ListChecks />
-						Context
+						{t("nav.context")}
 					</button>
 					<button type="button" className="sidebar-action" onClick={() => setInspector("workflows")}>
 						<Compass />
-						Workflows
+						{t("nav.workflows")}
 					</button>
 					<button type="button" className="sidebar-action" onClick={() => setInspector("collab")}>
 						<Radio />
-						Collab{collabState?.hosting ? ` (${collabState.participants.length})` : ""}
-					</button>
-					<button type="button" className="sidebar-action" onClick={() => setInspector("settings")}>
-						<Settings2 />
-						Settings
-					</button>
-					<button type="button" className="sidebar-action" onClick={() => setInspector("resources")}>
-						<Blocks />
-						Resources
+						{t("nav.collab")}
+						{collabState?.hosting ? ` (${collabState.participants.length})` : ""}
 					</button>
 					<button type="button" className="sidebar-action" onClick={() => setInspector("diagnostics")}>
 						<TerminalSquare />
-						Diagnostics
+						{t("nav.diagnostics")}
 					</button>
+					{/* Configuration is a full page, not a session inspector — hence the divider. */}
+					<div className="mt-1 border-t pt-1">
+						<button type="button" className="sidebar-action" onClick={() => openSettings()}>
+							<Settings2 />
+							{t("nav.settings")}
+						</button>
+					</div>
 				</div>
 			</aside>
 
 			<section
 				className={cn(
-					"grid min-w-0 grid-rows-[52px_minmax(0,1fr)_auto]",
+					"grid min-h-0 min-w-0 grid-rows-[52px_minmax(0,1fr)_auto]",
 					inspector && "grid-cols-[minmax(0,1fr)_360px]",
 				)}
 			>
@@ -1530,7 +1657,7 @@ export default function App() {
 							size="sm"
 							className="gap-1.5 text-muted-foreground"
 							onClick={() => setPaletteOpen(true)}
-							title="Command palette"
+							title={t("workspace.commandPalette")}
 						>
 							<SquareSlash className="size-3.5" />
 							<span className="text-[10px]">⌘K</span>
@@ -1555,8 +1682,8 @@ export default function App() {
 							variant="ghost"
 							size="icon"
 							onClick={cycleAppearance}
-							title="Change appearance"
-							aria-label="Change appearance"
+							title={t("workspace.changeAppearance")}
+							aria-label={t("workspace.changeAppearance")}
 						>
 							{dark ? <Moon /> : <Sun />}
 						</Button>
@@ -1564,8 +1691,8 @@ export default function App() {
 							variant="ghost"
 							size="icon"
 							onClick={() => setInspector(value => (value ? undefined : "changes"))}
-							title="Toggle inspector"
-							aria-label="Toggle inspector"
+							title={t("workspace.toggleInspector")}
+							aria-label={t("workspace.toggleInspector")}
 						>
 							<PanelRight />
 						</Button>
@@ -1573,7 +1700,10 @@ export default function App() {
 				</header>
 
 				<div className="col-start-1 min-h-0">
+					{/* Keyed by session so switching transcripts opens at the newest message
+					    with a fresh measurement cache instead of the previous session's offset. */}
 					<Transcript
+						key={session?.sessionId}
 						messages={messages}
 						shellRun={shellRun}
 						recovering={status === "recovering"}
@@ -1614,8 +1744,8 @@ export default function App() {
 										variant="ghost"
 										size="icon"
 										className="size-6"
-										title="Restore to composer"
-										aria-label="Restore to composer"
+										title={t("composer.restoreToComposer")}
+										aria-label={t("composer.restoreToComposer")}
 										onClick={() => restoreQueueItem(item)}
 									>
 										<Undo2 />
@@ -1624,8 +1754,8 @@ export default function App() {
 										variant="ghost"
 										size="icon"
 										className="size-6"
-										title="Remove queued message"
-										aria-label="Remove queued message"
+										title={t("composer.removeQueued")}
+										aria-label={t("composer.removeQueued")}
 										onClick={() => runIntent({ type: "remove_queue_item", queueItemId: item.id })}
 									>
 										<X />
@@ -1765,6 +1895,8 @@ export default function App() {
 								}
 							}}
 							onKeyDown={event => {
+								// The IME candidate window owns these keys until it commits.
+								if (isComposing(event)) return;
 								if (activeMenu) {
 									const items = activeMenu === "slash" ? slashMatches : fileMatches;
 									if (event.key === "ArrowDown") {
@@ -1847,8 +1979,8 @@ export default function App() {
 								variant="ghost"
 								size="icon"
 								className="size-8"
-								title="Attach images"
-								aria-label="Attach images"
+								title={t("composer.attachImages")}
+								aria-label={t("composer.attachImages")}
 								onClick={() => fileInput.current?.click()}
 							>
 								<ImagePlus />
@@ -1868,8 +2000,8 @@ export default function App() {
 									variant="outline"
 									size="icon"
 									className="size-8"
-									title="Abort"
-									aria-label="Abort"
+									title={t("composer.abort")}
+									aria-label={t("composer.abort")}
 									onClick={() => run({ type: "abort" })}
 								>
 									<Square className="size-3 fill-current" />
@@ -1878,8 +2010,8 @@ export default function App() {
 								<Button
 									size="icon"
 									className="size-8 rounded-full"
-									title="Send"
-									aria-label="Send"
+									title={t("composer.send")}
+									aria-label={t("composer.send")}
 									disabled={(!draft.trim() && images.length === 0) || status !== "connected"}
 									onClick={send}
 								>
@@ -1904,85 +2036,31 @@ export default function App() {
 
 				{inspector ? (
 					<aside className="col-start-2 row-span-3 row-start-1 min-h-0 border-l bg-card">
-						<div className="flex h-[52px] items-center border-b px-4">
-							<h2 className="text-sm font-medium capitalize">{inspector}</h2>
-							{(inspector === "files" || inspector === "changes") && status === "connected" ? (
-								<Button className="ml-auto mr-2" variant="ghost" size="sm" onClick={() => void refreshReview()}>
-									Refresh
-								</Button>
-							) : null}
-							{inspector === "approvals" && status === "connected" ? (
+						<div className="flex h-[52px] items-center gap-0.5 border-b px-2 pl-4">
+							<h2 className="min-w-0 flex-1 truncate text-sm font-medium">
+								{t(`nav.${inspector}` as MessageKey)}
+							</h2>
+							{refreshInspector && status === "connected" ? (
 								<Button
-									className="ml-auto mr-2"
 									variant="ghost"
-									size="sm"
-									onClick={() => void refreshApprovals()}
+									size="icon"
+									className="size-7"
+									title={t("common.refresh")}
+									aria-label={t("common.refresh")}
+									onClick={refreshInspector}
 								>
-									Refresh
+									<RefreshCw />
 								</Button>
 							) : null}
-							{inspector === "context" && status === "connected" ? (
-								<Button
-									className="ml-auto mr-2"
-									variant="ghost"
-									size="sm"
-									onClick={() => void refreshContext()}
-								>
-									Refresh
-								</Button>
-							) : null}
-							{inspector === "workflows" && status === "connected" ? (
-								<Button
-									className="ml-auto mr-2"
-									variant="ghost"
-									size="sm"
-									onClick={() => void refreshWorkflows()}
-								>
-									Refresh
-								</Button>
-							) : null}
-							{inspector === "diagnostics" && status === "connected" ? (
-								<Button
-									className="ml-auto mr-2"
-									variant="ghost"
-									size="sm"
-									onClick={() => void refreshSessionStats()}
-								>
-									Refresh
-								</Button>
-							) : null}
-							{inspector === "collab" && status === "connected" ? (
-								<Button
-									className="ml-auto mr-2"
-									variant="ghost"
-									size="sm"
-									onClick={() => void refreshCollabState()}
-								>
-									Refresh
-								</Button>
-							) : null}
-							{inspector === "settings" && status === "connected" ? (
-								<Button
-									className="ml-auto mr-2"
-									variant="ghost"
-									size="sm"
-									onClick={() => void refreshSettings()}
-								>
-									Refresh
-								</Button>
-							) : null}
-							{inspector === "resources" && status === "connected" ? (
-								<Button
-									className="ml-auto mr-2"
-									variant="ghost"
-									size="sm"
-									onClick={() => void refreshResources()}
-								>
-									Refresh
-								</Button>
-							) : null}
-							<Button className="ml-auto" variant="ghost" size="sm" onClick={() => setInspector(undefined)}>
-								Close
+							<Button
+								variant="ghost"
+								size="icon"
+								className="size-7"
+								title={t("common.close")}
+								aria-label={t("common.close")}
+								onClick={() => setInspector(undefined)}
+							>
+								<X />
 							</Button>
 						</div>
 						<div className="h-[calc(100%-52px)] text-sm leading-6 text-muted-foreground">
@@ -2007,17 +2085,10 @@ export default function App() {
 									<div className="grid h-full place-items-center">
 										<div className="flex items-center gap-2 text-xs">
 											{reviewLoading ? <LoaderCircle className="animate-spin" /> : null}
-											{reviewLoading ? "Reading workspace…" : "Workspace review unavailable"}
+											{reviewLoading ? t("workspace.readingWorkspace") : "Workspace review unavailable"}
 										</div>
 									</div>
 								)
-							) : inspector === "approvals" ? (
-								<ApprovalsInspector
-									policies={approvalPolicies}
-									loading={approvalsLoading}
-									onPromote={policyKey => void promoteApprovalPolicy(policyKey)}
-									onClear={(scope, policyKey) => void clearApprovalPolicy(scope, policyKey)}
-								/>
 							) : inspector === "context" ? (
 								<ContextInspector
 									context={contextState}
@@ -2050,38 +2121,24 @@ export default function App() {
 										void runWorkflowCommand({ type: "goal_set_budget", tokenBudget })
 									}
 								/>
-							) : inspector === "settings" ? (
-								<SettingsInspector
-									schema={settingsSchema}
-									values={settingValues}
-									loading={settingsLoading}
-									onSet={(settingPath, scope, value) => void setSettingValue(settingPath, scope, value)}
-									onReset={(settingPath, scope) => void resetSettingValue(settingPath, scope)}
-								/>
-							) : inspector === "resources" ? (
-								<ResourcesInspector
-									resources={resources}
-									loading={resourcesLoading}
-									onReload={() => void reloadResources()}
-								/>
 							) : inspector === "diagnostics" ? (
 								<div className="space-y-4 p-4">
 									<dl className="space-y-3">
 										<div>
-											<dt className="text-xs">Connection</dt>
+											<dt className="text-xs">{t("diagnostics.connection")}</dt>
 											<dd className="text-foreground">{status}</dd>
 										</div>
 										<div>
-											<dt className="text-xs">Project</dt>
+											<dt className="text-xs">{t("diagnostics.project")}</dt>
 											<dd className="break-all text-foreground">{project}</dd>
 										</div>
 										<div>
-											<dt className="text-xs">Session</dt>
+											<dt className="text-xs">{t("diagnostics.session")}</dt>
 											<dd className="break-all text-foreground">{session?.sessionId}</dd>
 										</div>
 									</dl>
 									<div>
-										<dt className="text-xs">Session stats</dt>
+										<dt className="text-xs">{t("diagnostics.sessionStats")}</dt>
 										{sessionStatsLoading && !sessionStats ? (
 											<dd className="mt-1 flex items-center gap-2 text-foreground">
 												<LoaderCircle className="size-3 animate-spin" />
@@ -2102,7 +2159,7 @@ export default function App() {
 												<p>${sessionStats.cost.toFixed(4)}</p>
 											</dd>
 										) : (
-											<dd className="mt-1 text-foreground">Not loaded.</dd>
+											<dd className="mt-1 text-foreground">{t("diagnostics.notLoaded")}</dd>
 										)}
 									</div>
 									<Button
@@ -2111,7 +2168,7 @@ export default function App() {
 										className="h-7 text-[11px]"
 										onClick={() => void handoffSession()}
 									>
-										Hand off session
+										{t("workspace.handoffSession")}
 									</Button>
 								</div>
 							) : inspector === "collab" ? (
@@ -2119,8 +2176,6 @@ export default function App() {
 									collab={collabState}
 									guest={collabGuestState}
 									loading={collabLoading}
-									relayUrl={collabRelayUrl}
-									onRelayUrlChange={setCollabRelayUrl}
 									onStart={() => void startCollab()}
 									onStop={() => void stopCollab()}
 									onOpenLink={openExternalUrl}
